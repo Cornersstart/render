@@ -1023,6 +1023,215 @@ def cmd_meta() -> str:
         return f"❌ Erro /meta: {e}"
 
 
+# ── /gv5 — Forçar avaliação imediata do Step Trail V5 ─────────────────────────
+def cmd_gv5() -> str:
+    """Avalia AGORA todas as posições abertas e aplica o grau Step Trail V5
+    correspondente ao lucro actual (idempotente: re-aplica o mesmo nível se já
+    estiver activo). Útil quando o utilizador quer forçar o lock sem esperar o
+    próximo ciclo de 20s do monitor."""
+    if not _has_creds(): return "❌ Sem credenciais OKX."
+    path = "/api/v5/account/positions?instType=SWAP"
+    try:
+        r = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=8)
+        positions = [p for p in r.json().get("data", []) if float(p.get("pos", 0) or 0) != 0]
+    except Exception as e:
+        return f"❌ Erro /gv5: {e}"
+    if not positions:
+        return "📭 <b>GV5:</b> Sem posições abertas."
+
+    actions: list[str] = []
+    travado = False
+    for p in positions:
+        sym     = p["instId"].replace("-USDT-SWAP", "")
+        inst_id = p["instId"]
+        pos_side = p["posSide"]
+        side     = "buy" if pos_side == "long" else "sell"
+        upl      = float(p.get("upl", 0) or 0)
+        avg_px   = float(p.get("avgPx",  0) or 0)
+        mark_px  = float(p.get("markPx", 0) or 0)
+        pos_sz   = int(float(p.get("pos", 0) or 0))
+
+        if avg_px <= 0 or mark_px <= 0 or pos_sz <= 0:
+            actions.append(f"⚠️ <code>{sym}</code>: dados inválidos.")
+            continue
+
+        # Encontra o grau MÁXIMO actualmente atingido (1-5)
+        tier_atingido = -1
+        for i, (trigger_usd, _lock_usd) in enumerate(STEP_TRAIL_LEVELS):
+            if upl >= trigger_usd:
+                tier_atingido = i
+
+        if tier_atingido < 0:
+            need = STEP_TRAIL_LEVELS[0][0]
+            actions.append(f"⏸ <code>{sym}</code>: lucro <b>${upl:+.2f}</b> &lt; trigger Grau 1 (${need:.0f})")
+            continue
+
+        trigger_usd, lock_usd = STEP_TRAIL_LEVELS[tier_atingido]
+        # Calcula preço de SL que garante 'lock_usd' USDT de lucro
+        if side == "buy":
+            price_move = mark_px - avg_px
+            lock_px    = avg_px + lock_usd * (price_move / upl)
+        else:
+            price_move = avg_px - mark_px
+            lock_px    = avg_px - lock_usd * (price_move / upl)
+
+        grau = tier_atingido + 1
+        try:
+            okx_cancel_all_algos(inst_id, pos_side); time.sleep(1)
+            okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
+            # Re-arma trailing logo acima do mark actual
+            act_px = mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy" else mark_px * (1 - TRAIL_ACTIVATE_PCT/100)
+            okx_trailing_stop(inst_id, pos_side, pos_sz, act_px)
+            travado = True
+            actions.append(
+                f"🔒 <code>{sym}</code> Grau <b>{grau}</b> aplicado\n"
+                f"   Lucro: <b>${upl:+.2f}</b> | Lock: <b>${lock_usd:.0f}</b>\n"
+                f"   SL blindado: <code>{lock_px:.5f}</code>")
+        except Exception as e:
+            actions.append(f"❌ <code>{sym}</code> Grau {grau} falhou: {e}")
+
+    header = "🚀 <b>GV5: Lucro travado com sucesso!</b>" if travado else "ℹ️ <b>GV5 — análise concluída</b>"
+    return header + "\n\n" + "\n".join(actions)
+
+
+# ── /force [coin] — Ordem manual ignorando filtros (RSI direccional) ──────────
+_FORCE_MAP = {
+    "pol": GOLD_POL, "eth": DUO_ETH, "sol": DUO_SOL,
+    "xrp": SHIELD_XRP, "ada": SHIELD_ADA, "doge": GOLD_DOGE,
+}
+
+def cmd_force(coin: str) -> str:
+    """Abre ordem de mercado IGNORANDO filtros de estratégia.
+    Direcção decidida por RSI 15m: > 50 → LONG  |  < 50 → SHORT.
+    Usa LEVERAGE=5x e SAFETY_MARGIN=3% (mesma config do bot)."""
+    if not _has_creds(): return "❌ Sem credenciais OKX."
+    coin = coin.lower().strip()
+    if coin not in _FORCE_MAP:
+        return ("❌ <b>/force</b> — moeda inválida.\n"
+                "Usar: <code>/force pol|eth|sol|xrp|ada|doge</code>")
+    inst_id = _FORCE_MAP[coin]
+    sym     = coin.upper()
+
+    # Bloqueia se já houver posição
+    existing = okx_any_position_open(ALL_SYMS)
+    if existing is not None:
+        ex_sym, ex_ps = existing
+        return (f"🛑 <b>/force {sym} bloqueado</b>\n"
+                f"Posição já aberta: <code>{ex_sym.replace('-USDT-SWAP','')}</code> {ex_ps.upper()}.\n"
+                f"Fecha primeiro com <code>/panic</code> ou aguarda saída natural.")
+
+    # RSI 15m direccional
+    try:
+        df = okx_candles(inst_id, bar="15m", limit=50)
+        df["rsi"] = ta.rsi(df["close"], length=14)
+        rsi = float(df["rsi"].iloc[-2])
+    except Exception as e:
+        return f"❌ /force {sym}: erro RSI ({e})"
+
+    side = "buy" if rsi > 50 else "sell"
+    dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
+
+    tg(f"⚡ <b>/force {sym}</b> — RSI={rsi:.1f} → {dir_txt}\nA executar...")
+    # _fire() trata de tudo: ordem + SL + trailing + monitor
+    ok = _fire(inst_id, side, f"FORCE RSI={rsi:.0f}", tag="🎯 FORCE")
+    if ok:
+        return (f"✅ <b>/force {sym} EXECUTADA</b>\n"
+                f"Direcção: {dir_txt}  |  RSI={rsi:.1f}\n"
+                f"Leverage: 5x  |  Safety: 3%  |  Step Trail V5 activo")
+    return f"❌ <b>/force {sym} falhou.</b> Ver logs para detalhes."
+
+
+# ── /risco — Análise táctica de risco da posição aberta ───────────────────────
+def okx_orderbook(inst_id: str, depth: int = 10) -> tuple[list, list] | None:
+    """Top-N bids/asks da OKX. Cada item: [price, size, ...]."""
+    try:
+        r = requests.get(f"{OKX_BASE}/market/books?instId={inst_id}&sz={depth}", timeout=8)
+        d = r.json()
+        if d.get("code") != "0" or not d.get("data"): return None
+        bk = d["data"][0]
+        return bk.get("bids", []), bk.get("asks", [])
+    except Exception:
+        return None
+
+
+def cmd_risco() -> str:
+    """Análise táctica: pressão do book, distância ao SL e veredito SAFE/CAUTION/DANGER."""
+    if not _has_creds(): return "❌ Sem credenciais OKX."
+    path = "/api/v5/account/positions?instType=SWAP"
+    try:
+        r = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=8)
+        positions = [p for p in r.json().get("data", []) if float(p.get("pos", 0) or 0) != 0]
+    except Exception as e:
+        return f"❌ Erro /risco: {e}"
+    if not positions:
+        return "📭 <b>/risco:</b> Sem posições abertas para analisar."
+
+    blocks: list[str] = []
+    for p in positions:
+        sym      = p["instId"].replace("-USDT-SWAP", "")
+        inst_id  = p["instId"]
+        pos_side = p["posSide"]
+        side_emoji = "LONG 🟢" if pos_side == "long" else "SHORT 🔴"
+        avg_px   = float(p.get("avgPx",  0) or 0)
+        mark_px  = float(p.get("markPx", 0) or 0)
+        upl      = float(p.get("upl", 0) or 0)
+
+        # 1) Pressão do book — top 10 níveis
+        ob = okx_orderbook(inst_id, depth=10)
+        if ob is None:
+            book_line = "📚 Book: indisponível"
+            book_score = 0.0
+        else:
+            bids, asks = ob
+            buy_vol  = sum(float(x[1]) for x in bids[:10])
+            sell_vol = sum(float(x[1]) for x in asks[:10])
+            tot      = buy_vol + sell_vol
+            buy_pct  = (buy_vol / tot * 100) if tot > 0 else 50.0
+            sell_pct = 100.0 - buy_pct
+            # Score: positivo = a favor da posição
+            if pos_side == "long":
+                book_score = buy_pct - sell_pct  # +N → bids dominam (bom para LONG)
+                fav = "✅ favorável" if book_score > 10 else ("⚖️ equilibrado" if abs(book_score) <= 10 else "⚠️ contra")
+            else:
+                book_score = sell_pct - buy_pct
+                fav = "✅ favorável" if book_score > 10 else ("⚖️ equilibrado" if abs(book_score) <= 10 else "⚠️ contra")
+            book_line = (f"📚 <b>Book top-10:</b> compras {buy_pct:.1f}% | vendas {sell_pct:.1f}% — {fav}")
+
+        # 2) Distância ao SL de 5% (HOLD) — em % de preço (não alavancado)
+        sl_pct = HOLD_SL_PCT  # 5.0
+        if avg_px > 0 and mark_px > 0:
+            if pos_side == "long":
+                sl_px = avg_px * (1 - sl_pct/100)
+                dist_to_sl = (mark_px - sl_px) / mark_px * 100
+            else:
+                sl_px = avg_px * (1 + sl_pct/100)
+                dist_to_sl = (sl_px - mark_px) / mark_px * 100
+            sl_line = (f"🛡️ <b>Distância ao SL ({sl_pct:.0f}%):</b> "
+                       f"<code>{sl_px:.5f}</code> — falta <b>{dist_to_sl:+.2f}%</b>")
+        else:
+            dist_to_sl = 999.0
+            sl_line    = "🛡️ Distância ao SL: dados inválidos"
+
+        # 3) Veredito táctico — combina lucro + book + distância ao SL
+        if upl > 0 and book_score >= 0 and dist_to_sl > 2.5:
+            verdict = "✅ <b>SAFE</b> — manter posição, Step Trail tratará dos lucros"
+        elif upl < 0 and book_score < -10 and dist_to_sl < 1.5:
+            verdict = "🚨 <b>DANGER</b> — sair fora (considerar /panic ou fecho manual)"
+        elif (upl < 0 and book_score < 0) or dist_to_sl < 1.5:
+            verdict = "⚠️ <b>CAUTION</b> — atenção redobrada, condições deteriorando"
+        else:
+            verdict = "🟡 <b>CAUTION</b> — situação neutra, monitorar"
+
+        blocks.append(
+            f"<b>📊 {sym} {side_emoji}</b>\n"
+            f"   Entrada: <code>{avg_px:.5f}</code> | Mark: <code>{mark_px:.5f}</code>\n"
+            f"   P&amp;L: <b>${upl:+.2f} USDT</b>\n"
+            f"   {book_line}\n"
+            f"   {sl_line}\n"
+            f"   <b>Veredito:</b> {verdict}")
+    return "🎯 <b>/risco — Análise táctica</b>\n\n" + "\n\n".join(blocks)
+
+
 def cmd_panic() -> str:
     """Fecha todas as posições e pausa o bot por 5 minutos."""
     global _bot_authorized, _panic_until
@@ -1088,7 +1297,10 @@ def _status_text() -> str:
             f"💰 {bal_str}\n"
             f"Status: {status}\n"
             f"🥇 POL AUTO  |  ETH SOL XRP ADA DOGE → /go[coin]\n"
-            f"Step Trail V5 | CB -{CIRCUIT_BREAKER_PCT:.0f}% | SL {HOLD_SL_PCT:.0f}% | 5× | cd 30min")
+            f"Step Trail V5 | CB -{CIRCUIT_BREAKER_PCT:.0f}% | SL {HOLD_SL_PCT:.0f}% | 5× | cd 30min\n\n"
+            f"<b>10 COMANDOS:</b>\n"
+            f"/tp /radar /lpd /meta /status /panic\n"
+            f"/go[coin] /gv5 /force [coin] /risco")
 
 def report_loop() -> None:
     last = time.time()
@@ -1147,7 +1359,10 @@ def telegram_commands_loop() -> None:
                 msg = upd.get("message") or upd.get("edited_message")
                 if not msg or not msg.get("text"): continue
                 chat_id = msg["chat"]["id"]
-                cmd = msg["text"].strip().lower().split()[0].lstrip("/").split("@")[0]
+                _txt    = msg["text"].strip()
+                _parts  = _txt.lower().split()
+                cmd     = _parts[0].lstrip("/").split("@")[0]
+                args    = _parts[1:]   # argumentos (ex: /force pol → ["pol"])
 
                 # ── controlo ──────────────────────────────────────────────────
                 if cmd in ("start", "resume", "on", "autorizar"):
@@ -1195,6 +1410,25 @@ def telegram_commands_loop() -> None:
                         tg(cmd_panic(), chat_id)
                     except Exception as e: tg(f"Erro /panic: {e}", chat_id)
 
+                # ── /gv5 — força check Step Trail V5 e trava lucros ───────────
+                elif cmd == "gv5":
+                    try: tg(cmd_gv5(), chat_id)
+                    except Exception as e: tg(f"Erro /gv5: {e}", chat_id)
+
+                # ── /force [coin] — ordem de mercado bypass filtros ───────────
+                elif cmd == "force":
+                    if not args:
+                        tg("❌ <b>/force</b> precisa de moeda.\n"
+                           "Usar: <code>/force pol|eth|sol|xrp|ada|doge</code>", chat_id)
+                    else:
+                        try: tg(cmd_force(args[0]), chat_id)
+                        except Exception as e: tg(f"Erro /force: {e}", chat_id)
+
+                # ── /risco — análise táctica da posição aberta ────────────────
+                elif cmd == "risco":
+                    try: tg(cmd_risco(), chat_id)
+                    except Exception as e: tg(f"Erro /risco: {e}", chat_id)
+
                 # ── /go[coin] — confirma sinal pendente ───────────────────────
                 elif cmd in _GO_MAP:
                     inst_id = _GO_MAP[cmd]
@@ -1213,20 +1447,25 @@ def telegram_commands_loop() -> None:
 
                 # ── /help ──────────────────────────────────────────────────────
                 elif cmd in ("help", "ajuda"):
-                    tg("🤖 <b>V8 COMMANDER — COMANDOS</b>\n\n"
+                    tg("🤖 <b>V8 COMMANDER — 10 COMANDOS</b>\n\n"
                        "<b>Controlo:</b>\n"
                        "/start — Autorizar  |  /pause — Pausar\n"
                        "/panic — ⚠️ Fecha tudo + pausa 5min\n\n"
-                       "<b>Info:</b>\n"
+                       "<b>Info &amp; análise:</b>\n"
                        "/status — Estado + saldo\n"
                        "/tp — P&amp;L posições abertas\n"
                        "/radar — RSI/proximidade triggers\n"
                        "/lpd — P&amp;L realizado 24h\n"
-                       "/meta — Progresso meta $600/mês\n\n"
-                       "<b>Confirmação de sinal (120s):</b>\n"
-                       "/goeth  /gosol  /goxrp  /goada  /godoge\n\n"
+                       "/meta — Progresso meta $600/mês\n"
+                       "/risco — Análise táctica (book + SL + veredito)\n\n"
+                       "<b>Acção manual:</b>\n"
+                       "/go[coin] — Confirma sinal pendente (120s)\n"
+                       "  /goeth  /gosol  /goxrp  /goada  /godoge\n"
+                       "/force [coin] — Ordem mercado bypass filtros\n"
+                       "  Ex: <code>/force pol</code>  (RSI 15m decide LONG/SHORT)\n"
+                       "/gv5 — Força check Step Trail V5 e trava lucros\n\n"
                        "🥇 POL — AUTOFIRE  |  Resto → /go[coin]\n"
-                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  Step Trail V5  |  SL {HOLD_SL_PCT:.0f}%  |  cd 30min", chat_id)
+                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  Step Trail V5  |  SL {HOLD_SL_PCT:.0f}%  |  5x  |  cd 30min", chat_id)
 
         except Exception as e:
             log.warning("tg_polling: %s", e)
@@ -1470,7 +1709,8 @@ if __name__ == "__main__":
     log.info("║   SL: HOLD %.0f%% | STRICT %.1f%% | CB -%.0f%%        ║",
              HOLD_SL_PCT, STRICT_SL_PCT, CIRCUIT_BREAKER_PCT)
     log.info("║   🔒 STEP TRAIL V5 ATIVO  |  %dx  |  cd 30min   ║", LEVERAGE)
-    log.info("║   /tp /radar /lpd /meta /panic                 ║")
+    log.info("║   10 CMDS: /tp /radar /lpd /meta /status       ║")
+    log.info("║           /panic /go[coin] /gv5 /force /risco  ║")
     log.info("╚══════════════════════════════════════════════════╝")
 
     # Estado persistido
