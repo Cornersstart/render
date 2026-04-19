@@ -1,6 +1,7 @@
 """
-TradeSniper Bot — V8 FULL SQUAD + GOLDEN RECOVERY DOCTRINE
-Doutrina : ONE TARGET, ONE KILL  |  $20 PROFIT LOCK = LAW
+TradeSniper Bot — V8 FULL SQUAD + GOLDEN RECOVERY DOCTRINE + STEP TRAIL V5
+BUILD: 2026-04-19 — Step Trail V5 | SL HOLD 5% | Leverage cache | Margin 3%
+Doutrina : ONE TARGET, ONE KILL  |  STEP TRAIL V5 = LAW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🏆 GOLDEN DOCTRINE (backtest 103 dias — actualizada Abr/2026):
   🥇 POL — E09 ICHIMOKU 1H            (97.4% hit, +$1.222 líq.)  HOLD
@@ -77,8 +78,15 @@ OB_BODY_MULT   = 1.5   # corpo do expansion candle ≥ 1.5× média
 OB_TOL_PCT     = 0.4   # tolerância ±0.4% para toque no midpoint
 OB_SL_PCT      = 1.0   # SL da estratégia OB (diferente do DUO)
 
-# ── $20 PROFIT LOCK ────────────────────────────────────────────────────────────
-PROFIT_LOCK_USD = 20.0  # move o SL para garantir lucro mínimo de $20
+# ── STEP TRAILING V5 — 5 graus baseados em PnL não realizado (USDT) ───────────
+# Cada tuple: (trigger_usd, lock_usd) — ao atingir trigger, SL sobe para lock
+STEP_TRAIL_LEVELS: list[tuple[float, float]] = [
+    (25.0,  15.0),   # Grau 1: hit +$25  → piso +$15
+    (40.0,  25.0),   # Grau 2: hit +$40  → piso +$25
+    (60.0,  40.0),   # Grau 3: hit +$60  → piso +$40
+    (80.0,  60.0),   # Grau 4: hit +$80  → piso +$60
+    (100.0, 80.0),   # Grau 5: hit +$100 → piso +$80
+]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GOLDEN RECOVERY DOCTRINE — regras de hold por par (Abr/2026)
@@ -89,7 +97,7 @@ STRICT_SL_PCT = 1.5
 # HOLD: SL na corretora é REDE DE SEGURANÇA (caso o bot/monitor caia).
 # O controlo primário é o CIRCUIT_BREAKER no monitor (7.0%) — dispara primeiro.
 # Folga de 1pp evita corrida dupla CB-vs-exchange-SL no mesmo tick.
-HOLD_SL_PCT   = 8.0
+HOLD_SL_PCT   = 5.0
 CIRCUIT_BREAKER_PCT = 7.0   # global — monitor fecha SEMPRE a -7% em preço
 
 # ── E06 SUPERTREND (SOL 15m) ──────────────────────────────────────────────────
@@ -257,9 +265,21 @@ def okx_get_position(inst_id: str, pos_side: str) -> dict | None:
     return None
 
 # ── OKX — leverage ────────────────────────────────────────────────────────────
-def okx_set_leverage(inst_id: str) -> None:
+# Cache: pares cuja alavancagem já foi confirmada nesta sessão (evita reprocessar
+# em cada ciclo, o que gera taxas inúteis e ruído de logs)
+_LEVERAGE_SET: set[str] = set()
+
+def okx_set_leverage(inst_id: str, force: bool = False) -> None:
+    """Define a alavancagem para o par (long+short).
+
+    Roda APENAS UMA VEZ por par/sessão (cache em _LEVERAGE_SET).
+    Reset com `force=True` quando ocorrer 'Parameter Error' numa ordem.
+    """
     if not _has_creds(): return
+    if inst_id in _LEVERAGE_SET and not force:
+        return
     path = "/api/v5/account/set-leverage"
+    ok_sides = 0
     for ps in ("long", "short"):
         payload = {"instId": inst_id, "lever": str(LEVERAGE), "mgnMode": "isolated", "posSide": ps}
         body = json.dumps(payload)
@@ -268,10 +288,13 @@ def okx_set_leverage(inst_id: str) -> None:
             d = r.json()
             if d.get("code") == "0":
                 log.info("leverage %s %s: %dx ✓", inst_id, ps, LEVERAGE)
+                ok_sides += 1
             else:
                 log.warning("leverage %s %s: %s", inst_id, ps, d.get("msg"))
         except Exception as e:
             log.warning("leverage %s %s: %s", inst_id, ps, e)
+    if ok_sides == 2:
+        _LEVERAGE_SET.add(inst_id)
 
 # ── OKX — ticker ──────────────────────────────────────────────────────────────
 def okx_ticker(inst_id: str) -> float:
@@ -292,9 +315,16 @@ def okx_lot_size(inst_id: str) -> float:
         pass
     return 1.0
 
+# ── Margem de segurança ALL-IN ────────────────────────────────────────────────
+# 3% reservado: cobre taker fee open+close (0.05%×2 × 5x notional = 0.5% bal),
+# slippage de market order, e qualquer drift do availBal reportado pela OKX
+# entre o /balance e o /trade/order. Evita sCode=51008 (Insufficient Margin).
+SAFETY_MARGIN = 0.97
+
 def calc_qty(inst_id: str, price: float, balance: float) -> int:
     ct_val = okx_lot_size(inst_id)
-    return max(1, int(balance * RISK_FRAC * LEVERAGE / (price * ct_val)))
+    safe_balance = balance * SAFETY_MARGIN
+    return max(1, int(safe_balance * RISK_FRAC * LEVERAGE / (price * ct_val)))
 
 # ── OKX — market order ────────────────────────────────────────────────────────
 _SIDE_PS = {"buy": "long", "sell": "short"}
@@ -311,6 +341,10 @@ def okx_order(inst_id: str, side: str, qty: int) -> dict:
     sCode = str(item.get("sCode", ""))
     sMsg  = item.get("sMsg", "")
     if sCode and sCode not in ("0",):
+        # Em 'Parameter Error' (51000) a alavancagem pode ter sido descartada — força re-set
+        if sCode == "51000":
+            _LEVERAGE_SET.discard(inst_id)
+            log.warning("⚠️ [%s] Parameter Error → cache leverage limpo, próximo trade re-aplica.", inst_id)
         raise RuntimeError(f"order {inst_id} side={side} qty={qty}: sCode={sCode} sMsg='{sMsg}' | top msg='{d.get('msg')}'")
     if d.get("code") != "0":
         raise RuntimeError(f"order {inst_id} side={side} qty={qty}: code={d.get('code')} msg='{d.get('msg')}' raw={d}")
@@ -684,10 +718,10 @@ def _monitor(inst_id: str, pos_side: str, side: str,
              sym: str, dir_txt: str, bal: float, qty: int,
              tag: str = "DUO ELITE") -> None:
     global _duo_in_trade, _duo_cooldown_until
-    log.info("📡 SENTINELA [%s] %s %s | SL=%.5f | Trailing activa a %.5f | 💰 Lock $%.0f",
-             tag, sym, dir_txt, sl_px, activate_px, PROFIT_LOCK_USD)
-    _none_streak       = 0
-    _profit_lock_moved = False   # SL já foi movido para garantir $20 — só uma vez
+    log.info("📡 SENTINELA [%s] %s %s | SL=%.5f | Trailing activa a %.5f | STEP TRAIL V5",
+             tag, sym, dir_txt, sl_px, activate_px)
+    _none_streak      = 0
+    _step_trail_tier  = 0   # tier 0=nenhum activado; 1-5 = grau em vigor
     while True:
         time.sleep(20)
         try:
@@ -716,49 +750,48 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                         except Exception as e:
                             log.error("circuit breaker close fail %s: %s", sym, e)
 
-            # ── $20 PROFIT LOCK — move SL para blindar lucro mínimo ──────────
-            if pos is not None and not _profit_lock_moved:
-                upl      = float(pos.get("upl",    0) or 0)
-                mark_px  = float(pos.get("markPx", 0) or 0)
-                avg_px   = float(pos.get("avgPx",  entry) or entry)
-                pos_sz   = int(float(pos.get("pos", qty) or qty))
-
-                if upl >= PROFIT_LOCK_USD and mark_px > 0 and avg_px > 0:
-                    # Calcula o preço onde P&L = exactamente +$20
-                    # LONG:  price_move = markPx - avgPx  → lock = avgPx + $20*(move/upl)
-                    # SHORT: price_move = avgPx - markPx  → lock = avgPx - $20*(move/upl)
-                    if side == "buy":
-                        price_move = mark_px - avg_px
-                        lock_px    = avg_px + PROFIT_LOCK_USD * (price_move / upl)
-                    else:
-                        price_move = avg_px - mark_px
-                        lock_px    = avg_px - PROFIT_LOCK_USD * (price_move / upl)
-
-                    log.info("💰 PROFIT LOCK — $%.2f atingido | %s SL → %.5f (garante $%.0f)",
-                             upl, sym, lock_px, PROFIT_LOCK_USD)
-                    try:
-                        okx_cancel_all_algos(inst_id, pos_side)   # remove SL + Trailing antigos
-                        time.sleep(1)
-                        okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)   # novo SL no piso $20
-                        okx_trailing_stop(inst_id, pos_side, pos_sz,          # trailing continua
-                                          mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy"
-                                          else mark_px * (1 - TRAIL_ACTIVATE_PCT/100))
-                        _profit_lock_moved = True
-                        tg(f"🔒 <b>GRAU 1 — PROFIT LOCK $20 BLINDADO</b>\n"
-                           f"Par: <code>{sym}</code> | {dir_txt}\n"
-                           f"Lucro actual: <b>${upl:+.2f} USDT</b>\n"
-                           f"🛡️ Novo SL em: <code>{lock_px:.5f}</code>\n"
-                           f"Se o preço virar, saímos com <b>≥ $20 garantidos</b>.\n"
-                           f"📡 Trailing continua activo em busca de mais.")
-                    except Exception as e:
-                        log.error("profit lock move: %s — voltando a tentar", e)
-                _none_streak = 0
-                continue
-
-            # ── posição ainda aberta (lock já activo ou abaixo do threshold) ──
+            # ── STEP TRAILING V5 — 5 graus baseados em PnL não realizado ────────
             if pos is not None:
+                upl     = float(pos.get("upl",    0) or 0)
+                mark_px = float(pos.get("markPx", 0) or 0)
+                avg_px  = float(pos.get("avgPx",  entry) or entry)
+                pos_sz  = int(float(pos.get("pos", qty) or qty))
+
+                if _step_trail_tier < len(STEP_TRAIL_LEVELS) and mark_px > 0 and avg_px > 0:
+                    trigger_usd, lock_usd = STEP_TRAIL_LEVELS[_step_trail_tier]
+                    if upl >= trigger_usd:
+                        # Calcula o preço de SL que garante 'lock_usd' USDT de lucro
+                        # Interpolação linear: lock_px = avg ± lock_usd*(markPx-avg)/upl
+                        if side == "buy":
+                            price_move = mark_px - avg_px
+                            lock_px    = avg_px + lock_usd * (price_move / upl)
+                        else:
+                            price_move = avg_px - mark_px
+                            lock_px    = avg_px - lock_usd * (price_move / upl)
+
+                        grau = _step_trail_tier + 1
+                        log.info("🔒 STEP TRAIL GRAU %d — $%.0f atingido → piso $%.0f | %s SL=%.5f",
+                                 grau, trigger_usd, lock_usd, sym, lock_px)
+                        try:
+                            okx_cancel_all_algos(inst_id, pos_side)
+                            time.sleep(1)
+                            okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
+                            okx_trailing_stop(inst_id, pos_side, pos_sz,
+                                              mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy"
+                                              else mark_px * (1 - TRAIL_ACTIVATE_PCT/100))
+                            _step_trail_tier += 1
+                            tg(f"🔒 <b>STEP TRAIL GRAU {grau} ACTIVADO</b>\n"
+                               f"Par: <code>{sym}</code> | {dir_txt}\n"
+                               f"Lucro actual: <b>${upl:+.2f} USDT</b> (trigger ${trigger_usd:.0f})\n"
+                               f"🛡️ SL blindado em: <code>{lock_px:.5f}</code> (garante ${lock_usd:.0f})\n"
+                               f"📡 Trailing continua activo — próximo grau: "
+                               + (f"${STEP_TRAIL_LEVELS[_step_trail_tier][0]:.0f}" if _step_trail_tier < len(STEP_TRAIL_LEVELS) else "MAX atingido 🏆"))
+                        except Exception as e:
+                            log.error("step trail grau %d: %s — voltando a tentar", grau, e)
+
                 _none_streak = 0
                 continue
+
 
             _none_streak += 1
             if _none_streak < 3:
@@ -775,9 +808,10 @@ def _monitor(inst_id: str, pos_side: str, side: str,
             pnl_usd = bal * pnl_pct / 100
             win     = pnl_pct > 0
 
-            if _profit_lock_moved:
+            if _step_trail_tier > 0:
                 icon   = "✅" if win else "⚠️"
-                result = f"SAÍDA COM LUCRO 🎯 (piso $20 activo)" if win else "SAÍDA ABAIXO DO LOCK ⚠️"
+                result = (f"SAÍDA COM LUCRO 🎯 (Step Trail Grau {_step_trail_tier} activo)"
+                          if win else f"SAÍDA ABAIXO DO PISO — Grau {_step_trail_tier} ⚠️")
             else:
                 icon   = "🎯" if win else "💥"
                 result = "SAÍDA COM LUCRO 🎯" if win else "SAÍDA COM PERDA 💥"
@@ -788,8 +822,8 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                f"P&L: <b>${pnl_usd:+.2f} USDT</b> ({pnl_pct:+.2f}%)\n"
                f"⏳ Cooldown 30 min activado.")
 
-            log.info("📊 [%s] %s fechado | exit=%.5f P&L $%.2f (%.2f%%) | lock_moved=%s",
-                     tag, sym, exit_px, pnl_usd, pnl_pct, _profit_lock_moved)
+            log.info("📊 [%s] %s fechado | exit=%.5f P&L $%.2f (%.2f%%) | step_tier=%d",
+                     tag, sym, exit_px, pnl_usd, pnl_pct, _step_trail_tier)
             with _duo_lock:
                 _duo_in_trade       = False
                 _duo_cooldown_until = time.time() + DUO_COOLDOWN
@@ -808,7 +842,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
     """Executa ordem de mercado + SL inicial + Trailing Stop.
 
     Golden Doctrine SL routing (sobrepõe sl_pct passado, excepto se for explícito):
-      - HOLD pairs (POL/ETH/SOL): SL = HOLD_SL_PCT (7%) → só circuit breaker
+      - HOLD pairs (POL/ETH/SOL): SL = HOLD_SL_PCT (5%) → só circuit breaker
       - STRICT pairs (ADA/XRP/DOGE): SL = STRICT_SL_PCT (1.5%) — não segurar
       - Outros: usa sl_pct passado ou DUO_SL_PCT
     """
@@ -939,9 +973,11 @@ def cmd_radar() -> str:
 
 
 def cmd_lpd() -> str:
-    """P&L realizado nas últimas 24 horas."""
+    """P&L realizado nas últimas 24 horas (nunca antes de 18 Abr 2026)."""
     if not _has_creds(): return "❌ Sem credenciais OKX."
-    cutoff = int((time.time() - 86400) * 1000)
+    # Piso absoluto: 18 Abril 2026 00:00 UTC — ignora trades de teste anteriores
+    PNL_FLOOR_MS = int(datetime(2026, 4, 18, tzinfo=timezone.utc).timestamp() * 1000)
+    cutoff = max(int((time.time() - 86400) * 1000), PNL_FLOOR_MS)
     path   = "/api/v5/trade/fills-history?instType=SWAP&limit=100"
     try:
         r     = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=10)
@@ -962,10 +998,11 @@ def cmd_lpd() -> str:
 
 
 def cmd_meta() -> str:
-    """Progresso em relação à meta de $600/mês."""
+    """Progresso em relação à meta de $600/mês (desde 18 Abr 2026)."""
     if not _has_creds(): return "❌ Sem credenciais OKX."
     now   = datetime.now(timezone.utc)
-    start = int(datetime(now.year, now.month, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    # Hardcoded: apenas trades a partir de 18 Abril 2026 — ignora trades de teste
+    start = int(datetime(2026, 4, 18, tzinfo=timezone.utc).timestamp() * 1000)
     path  = "/api/v5/trade/fills-history?instType=SWAP&limit=100"
     try:
         r     = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=10)
@@ -981,7 +1018,7 @@ def cmd_meta() -> str:
                 f"<code>[{bar}]</code> {pct:.1f}%\n"
                 f"Realizado: <b>${net:+.2f}</b> / Meta: <b>${MONTHLY_GOAL_USD:.0f}</b>\n"
                 f"Faltam: <b>${max(MONTHLY_GOAL_USD - net, 0):.2f} USDT</b>\n"
-                f"Trades no mês: {len(fills)}")
+                f"Trades desde 18 Abr: {len(fills)}")
     except Exception as e:
         return f"❌ Erro /meta: {e}"
 
@@ -1051,7 +1088,7 @@ def _status_text() -> str:
             f"💰 {bal_str}\n"
             f"Status: {status}\n"
             f"🥇 POL AUTO  |  ETH SOL XRP ADA DOGE → /go[coin]\n"
-            f"Lock +${PROFIT_LOCK_USD:.0f} | CB -{CIRCUIT_BREAKER_PCT:.0f}% | 5× | cd 30min")
+            f"Step Trail V5 | CB -{CIRCUIT_BREAKER_PCT:.0f}% | SL {HOLD_SL_PCT:.0f}% | 5× | cd 30min")
 
 def report_loop() -> None:
     last = time.time()
@@ -1189,7 +1226,7 @@ def telegram_commands_loop() -> None:
                        "<b>Confirmação de sinal (120s):</b>\n"
                        "/goeth  /gosol  /goxrp  /goada  /godoge\n\n"
                        "🥇 POL — AUTOFIRE  |  Resto → /go[coin]\n"
-                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  Lock +${PROFIT_LOCK_USD:.0f}  |  cd 30min", chat_id)
+                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  Step Trail V5  |  SL {HOLD_SL_PCT:.0f}%  |  cd 30min", chat_id)
 
         except Exception as e:
             log.warning("tg_polling: %s", e)
@@ -1228,7 +1265,7 @@ def duo_elite_loop() -> None:
        "/tp — P&amp;L posições  |  /radar — proximity\n"
        "/lpd — P&amp;L 24h  |  /meta — meta $600/mês\n"
        "/panic — fecha tudo + pausa 5min\n\n"
-       f"💰 Lock +${PROFIT_LOCK_USD:.0f}  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  "
+       f"🔒 Step Trail V5  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  SL {HOLD_SL_PCT:.0f}%  |  "
        f"Cooldown 30min  |  {LEVERAGE}× ALL-IN\n"
        "✅ <b>POL IS THE FRONT LINE.</b>")
 
@@ -1430,9 +1467,9 @@ if __name__ == "__main__":
     log.info("║   TradeSniper V8 COMMANDER SUITE               ║")
     log.info("║   🥇 POL  [ICHIMOKU 1H]  AUTOFIRE  97.4%% hit  ║")
     log.info("║   ⚡ ETH/SOL/XRP/ADA/DOGE → /go[coin] (120s)  ║")
-    log.info("║   SL: HOLD %.0f%% | STRICT %.1f%% | CB -%.0f%% | %dx   ║",
-             HOLD_SL_PCT, STRICT_SL_PCT, CIRCUIT_BREAKER_PCT, LEVERAGE)
-    log.info("║   💰 $%.0f LOCK | Cooldown 30min               ║", PROFIT_LOCK_USD)
+    log.info("║   SL: HOLD %.0f%% | STRICT %.1f%% | CB -%.0f%%        ║",
+             HOLD_SL_PCT, STRICT_SL_PCT, CIRCUIT_BREAKER_PCT)
+    log.info("║   🔒 STEP TRAIL V5 ATIVO  |  %dx  |  cd 30min   ║", LEVERAGE)
     log.info("║   /tp /radar /lpd /meta /panic                 ║")
     log.info("╚══════════════════════════════════════════════════╝")
 
