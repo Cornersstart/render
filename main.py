@@ -1,22 +1,31 @@
 """
-TradeSniper Bot — V8 FULL SQUAD + GOLDEN RECOVERY DOCTRINE + STEP TRAIL V5
-BUILD: 2026-04-19 — Step Trail V5 | SL HOLD 5% | Leverage cache | Margin 3%
+TradeSniper Bot — V9 FULL SQUAD + FVG EXPANSION + GOLDEN RECOVERY DOCTRINE + STEP TRAIL V5
+BUILD: 2026-04-19 — V9: FVG SOL/BNB/ETH adicionados | Step Trail V5 | SL HOLD 5% | Margin 3%
 Doutrina : ONE TARGET, ONE KILL  |  STEP TRAIL V5 = LAW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🏆 GOLDEN DOCTRINE (backtest 103 dias — actualizada Abr/2026):
   🥇 POL — E09 ICHIMOKU 1H            (97.4% hit, +$1.222 líq.)  HOLD
   🌊 SOL — E06 SUPERTREND 15m         (95.0% hit, +$515 líq.)    HOLD
   🎯 XRP — E07 RSI DIV + VWAP 15m     (PF 2.38, alta convicção)  STRICT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆕 FVG EXPANSION SQUAD (backtest 90 dias — adicionado V9):
+  🔷 SOL — E10 FAIR VALUE GAP 15m     (70.6% hit, ROI +70.4%)    HOLD
+  🔷 BNB — E11 FAIR VALUE GAP 15m     (65.2% hit, ROI +48.8%)    HOLD
+  🔷 ETH — E12 FAIR VALUE GAP 15m     (73.9% hit, ROI +34.9%)    HOLD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 LEGACY SQUAD (mantido como rede):
   💧 ETH — VWAP KISS M15                                          HOLD
   🔥 SOL — ENGOLFO M15  (extra trigger)                           HOLD
   🛡️ ADA — ORDER BLOCK 1H                                         STRICT
   🛡️ XRP — ORDER BLOCK 1H                                         STRICT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOLD pairs (POL/ETH/SOL): sem SL apertado, só circuit breaker -7%
+HOLD pairs (POL/ETH/SOL/BNB): sem SL apertado, só circuit breaker -7%
 STRICT pairs (ADA/XRP/DOGE): SL fixo 1.5% — backtest mostra ruína se segurar
 GLOBAL CIRCUIT BREAKER: -7% drawdown = fecho imediato (protege banca $900)
 Trailing +0.8% cb 1% | 5× Isolated ALL-IN | OKX Perpetual SWAP (hedge mode)
+FVG: gap entre high[i-2] e low[i] (bullish) ou low[i-2] e high[i] (bearish)
+     entrada no retorno ao midpoint ±0.3% | EMA200 + RSI 35-65 obrigatórios
+     gap expira após FVG_GAP_EXPIRY velas sem retorno (evita entradas stale)
 """
 
 import base64
@@ -54,7 +63,7 @@ TELEGRAM_CHAT  = os.environ.get("CHAT_ID",
                   os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
 
 OKX_BASE  = "https://www.okx.com/api/v5"
-LEVERAGE  = 5
+LEVERAGE  = 5          # alavancagem operacional — alterável via /subir6x /subir7x
 RISK_FRAC = 1.0    # ALL-IN
 
 # ── DUO DE ELITE ───────────────────────────────────────────────────────────────
@@ -69,7 +78,8 @@ SHIELD_ADA = "ADA-USDT-SWAP"
 SHIELD_XRP = "XRP-USDT-SWAP"
 GOLD_POL   = "POL-USDT-SWAP"      # 🥇 Golden pair — Ichimoku 1H exclusivo
 GOLD_DOGE  = "DOGE-USDT-SWAP"     # incluído na lista STRICT (regra de hold)
-ALL_SYMS   = [DUO_ETH, DUO_SOL, SHIELD_ADA, SHIELD_XRP, GOLD_POL, GOLD_DOGE]
+FVG_BNB    = "BNB-USDT-SWAP"      # 🆕 V9 — FVG expansion squad
+ALL_SYMS   = [DUO_ETH, DUO_SOL, SHIELD_ADA, SHIELD_XRP, GOLD_POL, GOLD_DOGE, FVG_BNB]
 
 # ── ORDER BLOCK DEFENSE (ADA / XRP — 1H) ──────────────────────────────────────
 OB_LOOKBACK    = 20    # velas 1H para procurar blocos de ordem
@@ -91,7 +101,7 @@ STEP_TRAIL_LEVELS: list[tuple[float, float]] = [
 # ══════════════════════════════════════════════════════════════════════════════
 # GOLDEN RECOVERY DOCTRINE — regras de hold por par (Abr/2026)
 # ══════════════════════════════════════════════════════════════════════════════
-HOLD_PAIRS    = {GOLD_POL, DUO_ETH, DUO_SOL}             # sem SL apertado
+HOLD_PAIRS    = {GOLD_POL, DUO_ETH, DUO_SOL, FVG_BNB}    # sem SL apertado
 STRICT_PAIRS  = {SHIELD_ADA, SHIELD_XRP, GOLD_DOGE}      # SL fixo 1.5%
 STRICT_SL_PCT = 1.5
 # HOLD: SL na corretora é REDE DE SEGURANÇA (caso o bot/monitor caia).
@@ -112,6 +122,16 @@ RSI_DIV_MIN_GAP  = 5       # diferença mínima entre topos/fundos do RSI
 ICHI_TENKAN  = 9
 ICHI_KIJUN   = 26
 ICHI_SENKOU  = 52
+
+# ── E10/E11/E12 FAIR VALUE GAP — SOL / BNB / ETH 15m ─────────────────────────
+# FVG: gap de liquidez criado por vela de impulso forte entre candles [i-2] e [i]
+#   Bullish FVG: high[i-2] < low[i]  → gap acima (SOL/BNB/ETH só acima da EMA200)
+#   Bearish FVG: low[i-2]  > high[i] → gap abaixo (só abaixo da EMA200)
+# Entrada: retorno do preço ao midpoint do gap (±FVG_TOL_PCT%)
+# Expiração: gap descartado após FVG_GAP_EXPIRY velas sem retorno (sinal stale)
+FVG_TOL_PCT    = 0.3   # tolerância ±0.3% ao midpoint do gap
+FVG_GAP_EXPIRY = 40    # máximo de velas aguardando retorno (≈10h em 15m)
+FVG_BODY_MULT  = 1.0   # impulso: corpo da vela central ≥ 1× média20 (filtro de qualidade)
 
 # ── DISCIPLINA DE SNIPER ──────────────────────────────────────────────────────
 LOCKDOWN_SECS    = 900   # 15 min de silêncio total após qualquer tentativa de ordem
@@ -710,6 +730,121 @@ def order_block_signal(df: pd.DataFrame) -> str | None:
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
+# E10/E11/E12 — FAIR VALUE GAP (SOL / BNB / ETH — 15m)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Cache de gaps activos por instrumento — persiste entre ciclos do loop principal
+# Estrutura: { inst_id: [ {gh, gl, side, created_bar, filled}, ... ] }
+_fvg_gaps: dict[str, list[dict]] = {}
+_fvg_bar_idx: dict[str, int]     = {}   # contador de velas por instrumento
+
+def fvg_signal(df: pd.DataFrame, inst_id: str) -> str | None:
+    """🔷 E10/E11/E12 FAIR VALUE GAP — SOL / BNB / ETH 15m  (backtest V9).
+
+    Detecta lacunas de liquidez (Fair Value Gaps) criadas por velas de impulso
+    e entra quando o preço retorna ao midpoint do gap.
+
+    Confirmações obrigatórias (todas):
+      1. Gap real entre high[i-2] e low[i] (bullish) ou low[i-2] e high[i] (bearish)
+      2. Vela central [i-1] com corpo ≥ FVG_BODY_MULT × média20 (impulso genuíno)
+      3. EMA200 alinhada com a direcção do gap
+      4. RSI 35–65 (evita entradas em extremos de mercado)
+      5. Retorno ao midpoint ± FVG_TOL_PCT% dentro de FVG_GAP_EXPIRY velas
+      6. Gap marcado como filled após entrada — sem re-entrada no mesmo gap
+
+    Regras de hold/strict herdadas de _fire() via classificação HOLD_PAIRS:
+      SOL, BNB, ETH → HOLD (SL 5%, circuit breaker -7%)
+    """
+    if len(df) < 230:   # warm-up EMA200 + margem
+        return None
+
+    df   = df.copy()
+    df["ema200"]  = ta.ema(df["close"], length=200)
+    df["rsi"]     = ta.rsi(df["close"], length=14)
+    df["body"]    = abs(df["close"] - df["open"])
+    df["body_ma"] = df["body"].rolling(20).mean()
+
+    if inst_id not in _fvg_gaps:
+        _fvg_gaps[inst_id]   = []
+        _fvg_bar_idx[inst_id] = 0
+
+    bar_now = _fvg_bar_idx[inst_id]
+
+    # ── Passo 1: detectar NOVOS gaps nas últimas 3 velas fechadas ─────────────
+    # Analisamos as últimas 5 velas para não perder gaps recentes após reinício
+    scan_start = max(2, len(df) - 5)
+    for i in range(scan_start, len(df) - 1):
+        a  = df.iloc[i - 2]
+        b  = df.iloc[i - 1]   # vela central (impulso)
+        c_ = df.iloc[i]
+
+        if any(pd.isna(x) for x in [b["ema200"], b["rsi"], b["body_ma"]]):
+            continue
+        if b["body_ma"] == 0:
+            continue
+
+        # Filtro de corpo: impulso genuíno
+        if b["body"] < b["body_ma"] * FVG_BODY_MULT:
+            continue
+
+        # Bullish FVG: high[i-2] < low[i]
+        if a["high"] < c_["low"] and b["close"] > b["ema200"]:
+            gap_id = f"B_{df.index[i].isoformat()}"
+            if not any(g.get("id") == gap_id for g in _fvg_gaps[inst_id]):
+                _fvg_gaps[inst_id].append({
+                    "id": gap_id, "gh": c_["low"], "gl": a["high"],
+                    "side": "buy", "created_bar": bar_now, "filled": False,
+                })
+
+        # Bearish FVG: low[i-2] > high[i]
+        if a["low"] > c_["high"] and b["close"] < b["ema200"]:
+            gap_id = f"S_{df.index[i].isoformat()}"
+            if not any(g.get("id") == gap_id for g in _fvg_gaps[inst_id]):
+                _fvg_gaps[inst_id].append({
+                    "id": gap_id, "gh": a["low"], "gl": c_["high"],
+                    "side": "sell", "created_bar": bar_now, "filled": False,
+                })
+
+    # ── Passo 2: verificar retorno a gaps existentes ──────────────────────────
+    cur = df.iloc[-2]   # vela fechada mais recente
+    if any(pd.isna(x) for x in [cur["ema200"], cur["rsi"]]):
+        _fvg_bar_idx[inst_id] = bar_now + 1
+        return None
+
+    rsi_ok = 35 <= cur["rsi"] <= 65
+    signal_out = None
+
+    active_gaps = [g for g in _fvg_gaps[inst_id]
+                   if not g["filled"] and bar_now - g["created_bar"] <= FVG_GAP_EXPIRY]
+
+    for g in active_gaps:
+        if not rsi_ok:
+            break
+        mid = (g["gh"] + g["gl"]) / 2
+        tol = mid * FVG_TOL_PCT / 100
+
+        if g["side"] == "buy" and cur["close"] > cur["ema200"]:
+            if abs(cur["low"] - mid) <= tol or (cur["low"] <= mid <= cur["high"]):
+                g["filled"] = True
+                signal_out  = "buy"
+                break
+
+        if g["side"] == "sell" and cur["close"] < cur["ema200"]:
+            if abs(cur["high"] - mid) <= tol or (cur["low"] <= mid <= cur["high"]):
+                g["filled"] = True
+                signal_out  = "sell"
+                break
+
+    # ── Passo 3: limpar gaps expirados ou preenchidos ─────────────────────────
+    _fvg_gaps[inst_id] = [
+        g for g in _fvg_gaps[inst_id]
+        if not g["filled"] and bar_now - g["created_bar"] <= FVG_GAP_EXPIRY
+    ]
+    _fvg_bar_idx[inst_id] = bar_now + 1
+
+    return signal_out
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MONITOR — aguarda fecho de posição em thread separada
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -950,9 +1085,10 @@ def cmd_radar() -> str:
     lines = ["📡 <b>RADAR — proximidade aos triggers</b>"]
     checks = [
         (GOLD_POL,   "POL",  "1H",  "🥇 ICHIMOKU"),
-        (DUO_SOL,    "SOL",  "15m", "🌊 SUPERTREND"),
+        (DUO_SOL,    "SOL",  "15m", "🌊 SUPERTREND+FVG"),
         (SHIELD_XRP, "XRP",  "15m", "🎯 RSI DIV"),
-        (DUO_ETH,    "ETH",  "15m", "💧 VWAP KISS"),
+        (DUO_ETH,    "ETH",  "15m", "💧 VWAP+FVG"),
+        (FVG_BNB,    "BNB",  "15m", "🔷 FVG"),
         (SHIELD_ADA, "ADA",  "1H",  "🛡️ OB"),
         (GOLD_DOGE,  "DOGE", "15m", "🎲 DOGE"),
     ]
@@ -1097,7 +1233,7 @@ def cmd_gv5() -> str:
 # ── /force [coin] — Ordem manual ignorando filtros (RSI direccional) ──────────
 _FORCE_MAP = {
     "pol": GOLD_POL, "eth": DUO_ETH, "sol": DUO_SOL,
-    "xrp": SHIELD_XRP, "ada": SHIELD_ADA, "doge": GOLD_DOGE,
+    "xrp": SHIELD_XRP, "ada": SHIELD_ADA, "doge": GOLD_DOGE, "bnb": FVG_BNB,
 }
 
 def cmd_force(coin: str) -> str:
@@ -1108,7 +1244,7 @@ def cmd_force(coin: str) -> str:
     coin = coin.lower().strip()
     if coin not in _FORCE_MAP:
         return ("❌ <b>/force</b> — moeda inválida.\n"
-                "Usar: <code>/force pol|eth|sol|xrp|ada|doge</code>")
+                "Usar: <code>/force pol|eth|sol|xrp|ada|doge|bnb</code>")
     inst_id = _FORCE_MAP[coin]
     sym     = coin.upper()
 
@@ -1293,14 +1429,18 @@ def _status_text() -> str:
         eq, avail = full
         bal_str = f"<b>${eq:,.2f}</b> total | <b>${avail:,.2f}</b> livre"
 
-    return (f"📊 <b>COMMANDER — {datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}</b>\n"
+    return (f"📊 <b>COMMANDER V9 — {datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}</b>\n"
             f"💰 {bal_str}\n"
             f"Status: {status}\n"
-            f"🥇 POL AUTO  |  ETH SOL XRP ADA DOGE → /go[coin]\n"
-            f"Step Trail V5 | CB -{CIRCUIT_BREAKER_PCT:.0f}% | SL {HOLD_SL_PCT:.0f}% | 5× | cd 30min\n\n"
-            f"<b>10 COMANDOS:</b>\n"
+            f"⚙️ Alavancagem: <b>{LEVERAGE}×</b>  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  SL {HOLD_SL_PCT:.0f}%  |  cd 30min\n"
+            f"🥇 POL AUTO  |  ETH SOL XRP ADA DOGE BNB → /go[coin]\n"
+            f"Step Trail V5  |  {LEVERAGE}× ALL-IN\n\n"
+            f"<b>SQUAD:</b> POL/SOL/ETH/XRP/ADA/DOGE/BNB (10 estratégias)\n\n"
+            f"<b>COMANDOS:</b>\n"
             f"/tp /radar /lpd /meta /status /panic\n"
-            f"/go[coin] /gv5 /force [coin] /risco")
+            f"/go[coin] /gv5 /force [coin] /risco\n"
+            f"/subir6x /subir7x — mudar alavancagem\n"
+            f"/pause — pausa até /start manual")
 
 def report_loop() -> None:
     last = time.time()
@@ -1320,6 +1460,7 @@ _GO_MAP = {
     "goxrp":  SHIELD_XRP,
     "goada":  SHIELD_ADA,
     "godoge": GOLD_DOGE,
+    "gobnb":  FVG_BNB,
 }
 
 def telegram_commands_loop() -> None:
@@ -1369,15 +1510,48 @@ def telegram_commands_loop() -> None:
                     with _auth_lock: _bot_authorized = True
                     _save_state(True)
                     _panic_until = 0.0
-                    tg("✅ <b>V8 COMMANDER AUTORIZADO</b>\n"
-                       "🥇 POL AUTOFIRE  |  ETH/SOL/XRP/ADA/DOGE → /go[coin]", chat_id)
+                    tg("✅ <b>V9 COMMANDER AUTORIZADO</b>\n"
+                       "🥇 POL/SOL/ETH/XRP/BNB AUTOFIRE  |  ADA/DOGE → /go[coin]\n"
+                       f"⚙️ Alavancagem actual: <b>{LEVERAGE}×</b>", chat_id)
                     log.info("Bot autorizado via Telegram")
 
                 elif cmd in ("pause", "stop", "off", "pausar"):
+                    # /pause = pausa PERMANENTE — só /start desbloqueia (sem auto-resume)
+                    global _panic_until
                     with _auth_lock: _bot_authorized = False
                     _save_state(False)
-                    tg("⛔ <b>Bot PAUSADO</b> — /start para retomar.", chat_id)
-                    log.info("Bot pausado via Telegram")
+                    _panic_until = 0.0   # cancela qualquer auto-resume pendente
+                    tg("⛔ <b>Bot PAUSADO</b>\n"
+                       "O bot <b>não retoma automaticamente</b>.\n"
+                       "Usa <code>/start</code> para autorizar novamente.", chat_id)
+                    log.info("Bot pausado (permanente) via Telegram")
+
+                # ── /subir6x — muda alavancagem para 6× ──────────────────────
+                elif cmd == "subir6x":
+                    global LEVERAGE
+                    LEVERAGE = 6
+                    _LEVERAGE_SET.clear()   # força re-aplicação em todos os pares
+                    for sym in ALL_SYMS:
+                        try: okx_set_leverage(sym)
+                        except Exception as e: log.warning("lev6x %s: %s", sym, e)
+                    tg("⚙️ <b>Alavancagem → 6×</b>\n"
+                       "Aplicado em todos os pares.\n"
+                       "⚠️ Margem por trade aumenta — certifica-te que a banca suporta.\n"
+                       "Usa <code>/subir7x</code> para 7× ou <code>/start</code> para confirmar estado.", chat_id)
+                    log.info("Alavancagem alterada para 6x via Telegram")
+
+                # ── /subir7x — muda alavancagem para 7× ──────────────────────
+                elif cmd == "subir7x":
+                    LEVERAGE = 7
+                    _LEVERAGE_SET.clear()
+                    for sym in ALL_SYMS:
+                        try: okx_set_leverage(sym)
+                        except Exception as e: log.warning("lev7x %s: %s", sym, e)
+                    tg("⚙️ <b>Alavancagem → 7×</b>\n"
+                       "Aplicado em todos os pares.\n"
+                       "⚠️ Risco de liquidação aumenta — circuit breaker -7% continua activo.\n"
+                       "Usa <code>/status</code> para confirmar estado.", chat_id)
+                    log.info("Alavancagem alterada para 7x via Telegram")
 
                 elif cmd in ("status", "s"):
                     try: tg(_status_text(), chat_id)
@@ -1447,12 +1621,16 @@ def telegram_commands_loop() -> None:
 
                 # ── /help ──────────────────────────────────────────────────────
                 elif cmd in ("help", "ajuda"):
-                    tg("🤖 <b>V8 COMMANDER — 10 COMANDOS</b>\n\n"
+                    tg("🤖 <b>V9 COMMANDER — FULL SQUAD (10 estratégias)</b>\n\n"
                        "<b>Controlo:</b>\n"
-                       "/start — Autorizar  |  /pause — Pausar\n"
-                       "/panic — ⚠️ Fecha tudo + pausa 5min\n\n"
+                       "/start — Autorizar bot\n"
+                       "/pause — ⛔ Pausa PERMANENTE (só /start desbloqueia)\n"
+                       "/panic — 🚨 Fecha tudo + pausa 5min\n\n"
+                       "<b>Alavancagem:</b>\n"
+                       "/subir6x — Mudar para 6× (aplica imediatamente)\n"
+                       "/subir7x — Mudar para 7× (aplica imediatamente)\n\n"
                        "<b>Info &amp; análise:</b>\n"
-                       "/status — Estado + saldo\n"
+                       "/status — Estado + saldo + alavancagem actual\n"
                        "/tp — P&amp;L posições abertas\n"
                        "/radar — RSI/proximidade triggers\n"
                        "/lpd — P&amp;L realizado 24h\n"
@@ -1460,12 +1638,13 @@ def telegram_commands_loop() -> None:
                        "/risco — Análise táctica (book + SL + veredito)\n\n"
                        "<b>Acção manual:</b>\n"
                        "/go[coin] — Confirma sinal pendente (120s)\n"
-                       "  /goeth  /gosol  /goxrp  /goada  /godoge\n"
+                       "  /goeth  /gosol  /goxrp  /goada  /godoge  /gobnb\n"
                        "/force [coin] — Ordem mercado bypass filtros\n"
-                       "  Ex: <code>/force pol</code>  (RSI 15m decide LONG/SHORT)\n"
+                       "  Ex: <code>/force bnb</code>  (RSI 15m decide LONG/SHORT)\n"
                        "/gv5 — Força check Step Trail V5 e trava lucros\n\n"
-                       "🥇 POL — AUTOFIRE  |  Resto → /go[coin]\n"
-                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  Step Trail V5  |  SL {HOLD_SL_PCT:.0f}%  |  5x  |  cd 30min", chat_id)
+                       "🥇 POL/SOL/XRP/ETH/BNB — AUTOFIRE\n"
+                       "⚡ ADA/DOGE → /go[coin] (manual confirm)\n\n"
+                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  Step Trail V5  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 30min", chat_id)
 
         except Exception as e:
             log.warning("tg_polling: %s", e)
@@ -1496,17 +1675,19 @@ def _queue_signal(inst_id: str, sig: str, signal_name: str, tag: str,
 
 def duo_elite_loop() -> None:
     global _duo_in_trade, _duo_cooldown_until, _panic_until
-    log.info("🎯 V8 COMMANDER SUITE — ELITE COMMANDS READY")
-    tg("🏆 <b>V8 ELITE COMMANDS READY. POL IS THE FRONT LINE.</b>\n\n"
+    log.info("🎯 V9 COMMANDER SUITE — FULL SQUAD + FVG EXPANSION READY")
+    tg("🏆 <b>V9 FULL SQUAD + FVG EXPANSION READY</b>\n\n"
        "🥇 <b>POL AUTOFIRE</b> — ICHIMOKU 1H (97.4% hit)\n"
-       "⚡ ETH/SOL/XRP/ADA/DOGE → alerta + /go[coin] (120s)\n\n"
-       "<b>Novos comandos:</b>\n"
-       "/tp — P&amp;L posições  |  /radar — proximity\n"
-       "/lpd — P&amp;L 24h  |  /meta — meta $600/mês\n"
-       "/panic — fecha tudo + pausa 5min\n\n"
-       f"🔒 Step Trail V5  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  SL {HOLD_SL_PCT:.0f}%  |  "
+       "🌊 <b>SOL AUTOFIRE</b> — SUPERTREND + FVG 15m\n"
+       "🎯 <b>XRP AUTOFIRE</b> — RSI DIV + VWAP 15m\n"
+       "💧 <b>ETH AUTOFIRE</b> — VWAP KISS + FVG 15m\n"
+       "🔷 <b>BNB AUTOFIRE</b> — FVG 15m (65.2% hit, ROI +48.8%)\n"
+       "⚡ ADA/DOGE → alerta + /go[coin] (120s)\n\n"
+       "<b>Novos pares V9:</b> BNB-FVG | SOL-FVG | ETH-FVG\n"
+       "<b>Gaps activos</b> em memória — expiram em 40 velas\n\n"
+       f"🔒 Step Trail V5  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  SL HOLD {HOLD_SL_PCT:.0f}%  |  STRICT {STRICT_SL_PCT:.1f}%  |  "
        f"Cooldown 30min  |  {LEVERAGE}× ALL-IN\n"
-       "✅ <b>POL IS THE FRONT LINE.</b>")
+       "✅ <b>10 ESTRATÉGIAS ATIVAS. SNIPER MODE ON.</b>")
 
     while True:
         try:
@@ -1656,6 +1837,59 @@ def duo_elite_loop() -> None:
                 except Exception as e:
                     log.error("[XRP] %s", e)
 
+            # ╔══════════════ FVG EXPANSION SQUAD (V9) ═══════════════════════╗
+            # ── 8: SOL — FAIR VALUE GAP 15m (70.6% hit / ROI +70.4%) ────────
+            if not fired:
+                try:
+                    sig = fvg_signal(okx_candles(DUO_SOL), DUO_SOL)
+                    if sig:
+                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                        log.info("🔷 FVG SOL → %s", sig.upper())
+                        tg(f"🔷 <b>SOL FAIR VALUE GAP</b>\n"
+                           f"Par: <code>SOL-USDT-SWAP</code> | {dir_scout} | HOLD\n"
+                           f"Retorno ao midpoint do gap | 70.6% hit | ROI +70.4%\n"
+                           f"⚡ Entrando automaticamente...")
+                        fired = _fire(DUO_SOL, sig, "FVG SOL 15m", tag="🔷 FVG SOL")
+                    else:
+                        log.info("[SOL/FVG] sem retorno ao gap")
+                except Exception as e:
+                    log.error("[SOL/FVG] %s", e)
+
+            # ── 9: BNB — FAIR VALUE GAP 15m (65.2% hit / ROI +48.8%) ────────
+            if not fired:
+                try:
+                    sig = fvg_signal(okx_candles(FVG_BNB), FVG_BNB)
+                    if sig:
+                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                        log.info("🔷 FVG BNB → %s", sig.upper())
+                        tg(f"🔷 <b>BNB FAIR VALUE GAP</b>\n"
+                           f"Par: <code>BNB-USDT-SWAP</code> | {dir_scout} | HOLD\n"
+                           f"Retorno ao midpoint do gap | 65.2% hit | ROI +48.8%\n"
+                           f"⚡ Entrando automaticamente...")
+                        fired = _fire(FVG_BNB, sig, "FVG BNB 15m", tag="🔷 FVG BNB")
+                    else:
+                        log.info("[BNB/FVG] sem retorno ao gap")
+                except Exception as e:
+                    log.error("[BNB/FVG] %s", e)
+
+            # ── 10: ETH — FAIR VALUE GAP 15m (73.9% hit / ROI +34.9%) ───────
+            if not fired:
+                try:
+                    sig = fvg_signal(okx_candles(DUO_ETH), DUO_ETH)
+                    if sig:
+                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                        log.info("🔷 FVG ETH → %s", sig.upper())
+                        tg(f"🔷 <b>ETH FAIR VALUE GAP</b>\n"
+                           f"Par: <code>ETH-USDT-SWAP</code> | {dir_scout} | HOLD\n"
+                           f"Retorno ao midpoint do gap | 73.9% hit | ROI +34.9%\n"
+                           f"⚡ Entrando automaticamente...")
+                        fired = _fire(DUO_ETH, sig, "FVG ETH 15m", tag="🔷 FVG ETH")
+                    else:
+                        log.info("[ETH/FVG] sem retorno ao gap")
+                except Exception as e:
+                    log.error("[ETH/FVG] %s", e)
+            # ╚═══════════════════════════════════════════════════════════════╝
+
         except Exception as e:
             log.error("loop: %s", e)
 
@@ -1702,23 +1936,26 @@ def _start_health_server() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    log.info("╔══════════════════════════════════════════════════╗")
-    log.info("║   TradeSniper V8 COMMANDER SUITE               ║")
-    log.info("║   🥇 POL  [ICHIMOKU 1H]  AUTOFIRE  97.4%% hit  ║")
-    log.info("║   ⚡ ETH/SOL/XRP/ADA/DOGE → /go[coin] (120s)  ║")
-    log.info("║   SL: HOLD %.0f%% | STRICT %.1f%% | CB -%.0f%%        ║",
+    log.info("╔══════════════════════════════════════════════════════╗")
+    log.info("║   TradeSniper V9 COMMANDER — FULL SQUAD + FVG       ║")
+    log.info("║   🥇 POL  [ICHIMOKU 1H]       AUTOFIRE  97.4%% hit  ║")
+    log.info("║   🌊 SOL  [SUPERTREND+FVG 15m] AUTOFIRE  95.0%% hit  ║")
+    log.info("║   🎯 XRP  [RSI DIV+VWAP 15m]  AUTOFIRE  PF 2.38    ║")
+    log.info("║   💧 ETH  [VWAP KISS+FVG 15m] AUTOFIRE              ║")
+    log.info("║   🔷 BNB  [FVG 15m]           AUTOFIRE  65.2%% hit  ║")
+    log.info("║   ⚡ ADA/DOGE → /go[coin] confirm manual (120s)     ║")
+    log.info("║   SL: HOLD %.0f%% | STRICT %.1f%% | CB -%.0f%%          ║",
              HOLD_SL_PCT, STRICT_SL_PCT, CIRCUIT_BREAKER_PCT)
-    log.info("║   🔒 STEP TRAIL V5 ATIVO  |  %dx  |  cd 30min   ║", LEVERAGE)
-    log.info("║   10 CMDS: /tp /radar /lpd /meta /status       ║")
-    log.info("║           /panic /go[coin] /gv5 /force /risco  ║")
-    log.info("╚══════════════════════════════════════════════════╝")
+    log.info("║   🔒 STEP TRAIL V5 ATIVO  |  %dx  |  cd 30min       ║", LEVERAGE)
+    log.info("║   FVG: gaps activos em memória | expiry %d velas    ║", FVG_GAP_EXPIRY)
+    log.info("╚══════════════════════════════════════════════════════╝")
 
     # Estado persistido
     with _auth_lock:
         _bot_authorized = _load_state()
     log.info("Estado: %s", "AUTORIZADO ✅" if _bot_authorized else "PAUSADO ⛔")
 
-    # Leverage
+    # Leverage — inclui BNB (V9)
     for sym in ALL_SYMS:
         okx_set_leverage(sym)
 
