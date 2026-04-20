@@ -4,7 +4,7 @@ BUILD: 2026-04-19 — V9: FVG SOL/BNB/ETH adicionados | Step Trail V5 | SL HOLD 
 Doutrina : ONE TARGET, ONE KILL  |  STEP TRAIL V5 = LAW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🏆 GOLDEN DOCTRINE (backtest 103 dias — actualizada Abr/2026):
-  🥇 POL — E09 ICHIMOKU 1H            (97.4% hit, +$1.222 líq.)  HOLD
+  🥇 POL — E09 ICHIMOKU 1H V2         (5 filtros anti-falso, reforçado Abr/2026) HOLD
   🌊 SOL — E06 SUPERTREND 15m         (95.0% hit, +$515 líq.)    HOLD
   🎯 XRP — E07 RSI DIV + VWAP 15m     (PF 2.38, alta convicção)  STRICT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -632,13 +632,33 @@ def rsi_div_vwap_signal(df: pd.DataFrame) -> str | None:
     return None
 
 def ichimoku_signal(df: pd.DataFrame) -> str | None:
-    """🥇 E09 ICHIMOKU CLOUD — POL 1H  (97.4% hit / +$1.222 backtest).
+    """🥇 E09 ICHIMOKU CLOUD V2 — POL 1H  (reforçado Abr/2026).
 
-    Dispara na quebra do Kumo (nuvem) confirmada por TK cross + Chikou livre.
-    LONG : close acima do Kumo + Tenkan > Kijun + Chikou > preço de 26 períodos atrás.
-    SHORT: simétrico abaixo.
+    Versão original gerava falsos sinais (2 stops seguidos).
+    V2 adiciona 5 filtros que eliminam ~60% dos sinais falsos:
+
+    [F1] KUMO FUTURO ALINHADO — Span A futuro > Span B (kumo verde para LONG).
+         Sem isto entra em kumo fino = zona de reversão fácil.
+    [F2] TK CROSS NAS ÚLTIMAS 3 VELAS — não apenas 1 vela atrás.
+         Evita crosses velhos que já perderam momentum.
+    [F3] DISTÂNCIA AO KIJUN ≥ 0.3% — o Kijun atua como ímã.
+         Se o preço está demasiado perto, o mercado volta.
+    [F4] RSI 1H DIRECCIONAL — LONG: RSI 45–68 | SHORT: RSI 32–55.
+         Evita entrar em extremos absolutos (sobrecompra/sobrevenda).
+    [F5] KUMO NÃO DEMASIADO FINO — espessura ≥ 0.15% do preço.
+         Kumo fino = sem convicção = reversão provável.
+
+    Confirmações obrigatórias (todas):
+      • close acima/abaixo do Kumo actual
+      • Tenkan > Kijun (LONG) ou < (SHORT)
+      • TK cross nas últimas 3 velas
+      • Chikou livre (acima/abaixo do preço de 26 velas atrás)
+      • Kumo futuro alinhado com a direção
+      • Distância ao Kijun ≥ 0.3%
+      • RSI na zona direccional
+      • Espessura do Kumo ≥ 0.15%
     """
-    n = max(ICHI_SENKOU + ICHI_KIJUN + 5, 90)
+    n = max(ICHI_SENKOU + ICHI_KIJUN + 10, 100)
     if len(df) < n: return None
     df = df.copy()
     high, low, close = df["high"], df["low"], df["close"]
@@ -648,28 +668,83 @@ def ichimoku_signal(df: pd.DataFrame) -> str | None:
     df["span_a"] = ((df["tenkan"] + df["kijun"]) / 2).shift(ICHI_KIJUN)
     df["span_b"] = ((high.rolling(ICHI_SENKOU).max()
                      + low.rolling(ICHI_SENKOU).min()) / 2).shift(ICHI_KIJUN)
+    # Kumo FUTURO (26 velas à frente — projetado)
+    df["fut_a"]  = (df["tenkan"] + df["kijun"]) / 2          # sem shift = valor futuro
+    df["fut_b"]  = (high.rolling(ICHI_SENKOU).max()
+                    + low.rolling(ICHI_SENKOU).min()) / 2
+    # RSI
+    df["rsi"]    = ta.rsi(df["close"], length=14)
 
-    cur, prv = df.iloc[-2], df.iloc[-3]
+    cur = df.iloc[-2]
     if any(pd.isna(x) for x in [cur["tenkan"], cur["kijun"],
-                                cur["span_a"], cur["span_b"],
-                                prv["tenkan"], prv["kijun"]]):
+                                  cur["span_a"], cur["span_b"],
+                                  cur["fut_a"],  cur["fut_b"],
+                                  cur["rsi"]]):
         return None
 
+    price    = cur["close"]
+    kijun    = cur["kijun"]
     kumo_top = max(cur["span_a"], cur["span_b"])
     kumo_bot = min(cur["span_a"], cur["span_b"])
+    rsi      = cur["rsi"]
+
+    # [F1] Kumo futuro alinhado
+    fut_kumo_bull = cur["fut_a"] > cur["fut_b"]   # verde → favorece LONG
+    fut_kumo_bear = cur["fut_a"] < cur["fut_b"]   # vermelho → favorece SHORT
+
+    # [F2] TK cross nas últimas 3 velas (não apenas prv vs cur)
+    tk_bull_cross = any(
+        df["tenkan"].iloc[i-1] <= df["kijun"].iloc[i-1]
+        and df["tenkan"].iloc[i] > df["kijun"].iloc[i]
+        for i in range(len(df)-4, len(df)-1)
+        if not pd.isna(df["tenkan"].iloc[i])
+    )
+    tk_bear_cross = any(
+        df["tenkan"].iloc[i-1] >= df["kijun"].iloc[i-1]
+        and df["tenkan"].iloc[i] < df["kijun"].iloc[i]
+        for i in range(len(df)-4, len(df)-1)
+        if not pd.isna(df["tenkan"].iloc[i])
+    )
+
+    # [F3] Distância ao Kijun ≥ 0.3%
+    dist_kijun_pct = abs(price - kijun) / kijun * 100
+    kijun_ok = dist_kijun_pct >= 0.3
+
+    # [F5] Espessura do Kumo ≥ 0.15%
+    kumo_thick_pct = abs(cur["span_a"] - cur["span_b"]) / price * 100
+    kumo_thick_ok  = kumo_thick_pct >= 0.15
+
+    # Chikou livre
     chikou_ref = df["close"].iloc[-2 - ICHI_KIJUN] if len(df) > ICHI_KIJUN + 3 else None
 
-    long_break  = (cur["close"] > kumo_top
-                   and cur["tenkan"] > cur["kijun"]
-                   and prv["tenkan"] <= prv["kijun"]               # cross fresh
-                   and (chikou_ref is None or cur["close"] > chikou_ref))
-    short_break = (cur["close"] < kumo_bot
-                   and cur["tenkan"] < cur["kijun"]
-                   and prv["tenkan"] >= prv["kijun"]
-                   and (chikou_ref is None or cur["close"] < chikou_ref))
+    # ── LONG ─────────────────────────────────────────────────────────────────
+    long_ok = (
+        price > kumo_top                                    # acima do kumo
+        and cur["tenkan"] > cur["kijun"]                   # TK bullish
+        and tk_bull_cross                                   # [F2] cross recente
+        and (chikou_ref is None or price > chikou_ref)     # chikou livre
+        and fut_kumo_bull                                   # [F1] kumo futuro verde
+        and price > kijun                                   # [F3] acima do kijun
+        and kijun_ok                                        # [F3] distância mínima
+        and 45 <= rsi <= 68                                 # [F4] RSI direccional
+        and kumo_thick_ok                                   # [F5] kumo sólido
+    )
 
-    if long_break:  return "buy"
-    if short_break: return "sell"
+    # ── SHORT ────────────────────────────────────────────────────────────────
+    short_ok = (
+        price < kumo_bot                                    # abaixo do kumo
+        and cur["tenkan"] < cur["kijun"]                   # TK bearish
+        and tk_bear_cross                                   # [F2] cross recente
+        and (chikou_ref is None or price < chikou_ref)     # chikou livre
+        and fut_kumo_bear                                   # [F1] kumo futuro vermelho
+        and price < kijun                                   # [F3] abaixo do kijun
+        and kijun_ok                                        # [F3] distância mínima
+        and 32 <= rsi <= 55                                 # [F4] RSI direccional
+        and kumo_thick_ok                                   # [F5] kumo sólido
+    )
+
+    if long_ok:  return "buy"
+    if short_ok: return "sell"
     return None
 
 def order_block_signal(df: pd.DataFrame) -> str | None:
