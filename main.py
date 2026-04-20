@@ -1432,15 +1432,13 @@ def _status_text() -> str:
     return (f"📊 <b>COMMANDER V9 — {datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}</b>\n"
             f"💰 {bal_str}\n"
             f"Status: {status}\n"
-            f"⚙️ Alavancagem: <b>{LEVERAGE}×</b>  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  SL {HOLD_SL_PCT:.0f}%  |  cd 30min\n"
-            f"🥇 POL AUTO  |  ETH SOL XRP ADA DOGE BNB → /go[coin]\n"
-            f"Step Trail V5  |  {LEVERAGE}× ALL-IN\n\n"
-            f"<b>SQUAD:</b> POL/SOL/ETH/XRP/ADA/DOGE/BNB (10 estratégias)\n\n"
+            f"⚙️ Alavancagem: <b>{LEVERAGE}×</b>  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  SL HOLD {HOLD_SL_PCT:.0f}%  |  cd 30min\n"
+            f"🔥 TODOS os 7 pares entram AUTOMÁTICO\n"
+            f"POL · SOL · ETH · XRP · BNB · ADA · DOGE\n\n"
             f"<b>COMANDOS:</b>\n"
             f"/tp /radar /lpd /meta /status /panic\n"
             f"/go[coin] /gv5 /force [coin] /risco\n"
-            f"/subir6x /subir7x — mudar alavancagem\n"
-            f"/pause — pausa até /start manual")
+            f"/subir6x /subir7x  |  /pause → só /start desbloqueia")
 
 def report_loop() -> None:
     last = time.time()
@@ -1511,7 +1509,8 @@ def telegram_commands_loop() -> None:
                     _save_state(True)
                     _panic_until = 0.0
                     tg("✅ <b>V9 COMMANDER AUTORIZADO</b>\n"
-                       "🥇 POL/SOL/ETH/XRP/BNB AUTOFIRE  |  ADA/DOGE → /go[coin]\n"
+                       "🔥 TODOS os pares entram AUTOMÁTICO quando há sinal\n"
+                       "POL/SOL/ETH/XRP/ADA/DOGE/BNB — sem confirmação manual\n"
                        f"⚙️ Alavancagem actual: <b>{LEVERAGE}×</b>", chat_id)
                     log.info("Bot autorizado via Telegram")
 
@@ -1642,8 +1641,8 @@ def telegram_commands_loop() -> None:
                        "/force [coin] — Ordem mercado bypass filtros\n"
                        "  Ex: <code>/force bnb</code>  (RSI 15m decide LONG/SHORT)\n"
                        "/gv5 — Força check Step Trail V5 e trava lucros\n\n"
-                       "🥇 POL/SOL/XRP/ETH/BNB — AUTOFIRE\n"
-                       "⚡ ADA/DOGE → /go[coin] (manual confirm)\n\n"
+                       "🥇 POL/SOL/XRP/ETH/BNB/ADA/DOGE — TODOS AUTOMÁTICOS\n"
+                       "(sem necessidade de /go[coin] — entra sozinho ao sinal)\n\n"
                        f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  Step Trail V5  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 30min", chat_id)
 
         except Exception as e:
@@ -1675,18 +1674,19 @@ def _queue_signal(inst_id: str, sig: str, signal_name: str, tag: str,
 
 def duo_elite_loop() -> None:
     global _duo_in_trade, _duo_cooldown_until, _panic_until
-    log.info("🎯 V9 COMMANDER SUITE — FULL SQUAD + FVG EXPANSION READY")
-    tg("🏆 <b>V9 FULL SQUAD + FVG EXPANSION READY</b>\n\n"
-       "🥇 <b>POL AUTOFIRE</b> — ICHIMOKU 1H (97.4% hit)\n"
-       "🌊 <b>SOL AUTOFIRE</b> — SUPERTREND + FVG 15m\n"
-       "🎯 <b>XRP AUTOFIRE</b> — RSI DIV + VWAP 15m\n"
-       "💧 <b>ETH AUTOFIRE</b> — VWAP KISS + FVG 15m\n"
-       "🔷 <b>BNB AUTOFIRE</b> — FVG 15m (65.2% hit, ROI +48.8%)\n"
-       "⚡ ADA/DOGE → alerta + /go[coin] (120s)\n\n"
-       "<b>Novos pares V9:</b> BNB-FVG | SOL-FVG | ETH-FVG\n"
-       "<b>Gaps activos</b> em memória — expiram em 40 velas\n\n"
-       f"🔒 Step Trail V5  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  SL HOLD {HOLD_SL_PCT:.0f}%  |  STRICT {STRICT_SL_PCT:.1f}%  |  "
-       f"Cooldown 30min  |  {LEVERAGE}× ALL-IN\n"
+    log.info("🎯 V9 COMMANDER SUITE — FULL SQUAD + FVG EXPANSION READY — TODOS AUTOFIRE")
+    tg("🏆 <b>V9 FULL SQUAD — TODOS OS PARES AUTOMÁTICOS</b>\n\n"
+       "🥇 <b>POL</b> — ICHIMOKU 1H (97.4% hit)\n"
+       "🌊 <b>SOL</b> — SUPERTREND + FVG 15m\n"
+       "🎯 <b>XRP</b> — RSI DIV + VWAP + OB 1H\n"
+       "💧 <b>ETH</b> — VWAP KISS + FVG 15m\n"
+       "🔷 <b>BNB</b> — FVG 15m (65.2% hit)\n"
+       "🛡️ <b>ADA</b> — ORDER BLOCK 1H\n"
+       "🎲 <b>DOGE</b> — ORDER BLOCK 1H\n\n"
+       "⚡ <b>TODOS entram automático</b> — sem /go[coin] obrigatório\n"
+       "(O /go[coin] ainda existe para confirmar manualmente se quiseres)\n\n"
+       f"🔒 Step Trail V5  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD {HOLD_SL_PCT:.0f}%  |  STRICT {STRICT_SL_PCT:.1f}%  |  "
+       f"{LEVERAGE}× ALL-IN  |  cd 30min\n"
        "✅ <b>10 ESTRATÉGIAS ATIVAS. SNIPER MODE ON.</b>")
 
     while True:
@@ -1831,11 +1831,27 @@ def duo_elite_loop() -> None:
                         tg(f"🛡️ <b>XRP ORDER BLOCK FIRED</b>\n"
                            f"Par: <code>XRP-USDT-SWAP</code> | {dir_scout} | STRICT 1.5%\n"
                            f"⚡ Entrando automaticamente...")
-                        _fire(SHIELD_XRP, sig, "ORDER BLOCK 1H", tag="SHIELD 🛡️")
+                        fired = _fire(SHIELD_XRP, sig, "ORDER BLOCK 1H", tag="SHIELD 🛡️")
                     else:
-                        log.info("[XRP] sem bloco")
+                        log.info("[XRP/OB] sem bloco")
                 except Exception as e:
-                    log.error("[XRP] %s", e)
+                    log.error("[XRP/OB] %s", e)
+
+            # ── 7b: DOGE — ORDER BLOCK DEFENSE (STRICT 1.5%) ─────────────────
+            if not fired:
+                try:
+                    sig = order_block_signal(okx_candles(GOLD_DOGE, bar="1H", limit=100))
+                    if sig:
+                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                        log.info("🎲 ORDER BLOCK DOGE → %s", sig.upper())
+                        tg(f"🎲 <b>DOGE ORDER BLOCK FIRED</b>\n"
+                           f"Par: <code>DOGE-USDT-SWAP</code> | {dir_scout} | STRICT 1.5%\n"
+                           f"⚡ Entrando automaticamente...")
+                        fired = _fire(GOLD_DOGE, sig, "ORDER BLOCK 1H", tag="🎲 DOGE SHIELD")
+                    else:
+                        log.info("[DOGE/OB] sem bloco")
+                except Exception as e:
+                    log.error("[DOGE/OB] %s", e)
 
             # ╔══════════════ FVG EXPANSION SQUAD (V9) ═══════════════════════╗
             # ── 8: SOL — FAIR VALUE GAP 15m (70.6% hit / ROI +70.4%) ────────
@@ -1943,7 +1959,9 @@ if __name__ == "__main__":
     log.info("║   🎯 XRP  [RSI DIV+VWAP 15m]  AUTOFIRE  PF 2.38    ║")
     log.info("║   💧 ETH  [VWAP KISS+FVG 15m] AUTOFIRE              ║")
     log.info("║   🔷 BNB  [FVG 15m]           AUTOFIRE  65.2%% hit  ║")
-    log.info("║   ⚡ ADA/DOGE → /go[coin] confirm manual (120s)     ║")
+    log.info("║   🛡️ ADA  [ORDER BLOCK 1H]    AUTOFIRE              ║")
+    log.info("║   🎲 DOGE [ORDER BLOCK 1H]    AUTOFIRE  STRICT 1.5%  ║")
+    log.info("║   ⚡ TODOS 7 PARES AUTOMÁTICOS — sem /go obrigatório  ║")
     log.info("║   SL: HOLD %.0f%% | STRICT %.1f%% | CB -%.0f%%          ║",
              HOLD_SL_PCT, STRICT_SL_PCT, CIRCUIT_BREAKER_PCT)
     log.info("║   🔒 STEP TRAIL V5 ATIVO  |  %dx  |  cd 30min       ║", LEVERAGE)
