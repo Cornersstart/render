@@ -1537,7 +1537,7 @@ _GO_MAP = {
 }
 
 def telegram_commands_loop() -> None:
-    global _tg_offset, _bot_authorized, _panic_until
+    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE
     if not TELEGRAM_TOKEN:
         log.warning("TELEGRAM_TOKEN não configurado — comandos desativados.")
         return
@@ -1591,7 +1591,6 @@ def telegram_commands_loop() -> None:
 
                 elif cmd in ("pause", "stop", "off", "pausar"):
                     # /pause = pausa PERMANENTE — só /start desbloqueia (sem auto-resume)
-                    global _panic_until
                     with _auth_lock: _bot_authorized = False
                     _save_state(False)
                     _panic_until = 0.0   # cancela qualquer auto-resume pendente
@@ -1602,7 +1601,6 @@ def telegram_commands_loop() -> None:
 
                 # ── /subir6x — muda alavancagem para 6× ──────────────────────
                 elif cmd == "subir6x":
-                    global LEVERAGE
                     LEVERAGE = 6
                     _LEVERAGE_SET.clear()   # força re-aplicação em todos os pares
                     for sym in ALL_SYMS:
