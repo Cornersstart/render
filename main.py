@@ -423,6 +423,54 @@ def okx_cancel_all_algos(inst_id: str, pos_side: str) -> None:
     except Exception as e:
         log.error("cancel_all_algos %s: %s", inst_id, e)
 
+# ── OKX — limpeza total de ordens (regulares + algos, ambos os lados) ────────
+def cancel_all_open_orders(inst_id: str) -> int:
+    """Cancela TODAS as ordens abertas para inst_id (regulares + algos, long+short).
+
+    Chamada obrigatória após qualquer saída de posição (circuit breaker, step
+    trail, stop loss, profit lock) para garantir que não ficam ordens órfãs.
+    Retorna o número de ordens canceladas.
+    """
+    if not _has_creds(): return 0
+    sym       = inst_id.replace("-USDT-SWAP", "")
+    cancelled = 0
+
+    # 1) Ordens regulares pendentes (limit/market não preenchidas)
+    try:
+        qpath = f"/api/v5/trade/orders-pending?instType=SWAP&instId={inst_id}"
+        r     = requests.get(f"https://www.okx.com{qpath}",
+                             headers=_headers("GET", qpath), timeout=8)
+        orders = r.json().get("data", [])
+        if orders:
+            to_cancel = [{"instId": inst_id, "ordId": o["ordId"]} for o in orders]
+            cpath = "/api/v5/trade/cancel-batch-orders"
+            cbody = json.dumps(to_cancel)
+            requests.post(f"https://www.okx.com{cpath}",
+                          headers=_headers("POST", cpath, cbody), data=cbody, timeout=8)
+            cancelled += len(to_cancel)
+    except Exception as e:
+        log.warning("cancel_all_open_orders regular %s: %s", sym, e)
+
+    # 2) Algo orders (SL / trailing stop) — ambos os lados (long + short)
+    try:
+        qpath  = "/api/v5/trade/orders-algo-pending"
+        params = f"?instType=SWAP&instId={inst_id}&ordType=conditional,move_order_stop"
+        r      = requests.get(f"https://www.okx.com{qpath}{params}",
+                              headers=_headers("GET", f"{qpath}{params}"), timeout=8)
+        algos = r.json().get("data", [])
+        if algos:
+            to_cancel = [{"algoId": o["algoId"], "instId": inst_id} for o in algos]
+            cpath = "/api/v5/trade/cancel-algos"
+            cbody = json.dumps(to_cancel)
+            requests.post(f"https://www.okx.com{cpath}",
+                          headers=_headers("POST", cpath, cbody), data=cbody, timeout=8)
+            cancelled += len(to_cancel)
+    except Exception as e:
+        log.warning("cancel_all_open_orders algos %s: %s", sym, e)
+
+    log.info("🧹 %s — Varredura de convés completa. Todas as ordens pendentes canceladas.", sym)
+    return cancelled
+
 # ── OKX — SL inicial (protecção antes do trailing activar) ────────────────────
 def okx_initial_sl(inst_id: str, pos_side: str, sz: int, sl_px: float) -> str | None:
     if not _has_creds(): return None
@@ -959,7 +1007,7 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                 if upl_tp >= PROFIT_LOCK_USD:
                     log.info("🎯 PROFIT LOCK +$%.2f atingido — fechando %s!", upl_tp, sym)
                     try:
-                        okx_cancel_all_algos(inst_id, pos_side)
+                        cancel_all_open_orders(inst_id)
                         time.sleep(0.5)
                         okx_close_market(inst_id, pos_side, pos_sz_tp)
                         tg(f"🎯 <b>PROFIT LOCK +${PROFIT_LOCK_USD:.0f} — FECHO COM LUCRO!</b>\n"
@@ -988,7 +1036,7 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                         log.warning("🚨 CIRCUIT BREAKER %s: -%.2f%% preço — fechando!",
                                     sym, adverse_pct)
                         try:
-                            okx_cancel_all_algos(inst_id, pos_side); time.sleep(0.5)
+                            cancel_all_open_orders(inst_id); time.sleep(0.5)
                             okx_close_market(inst_id, pos_side, pos_sz_cb)
                             tg(f"🚨 <b>CIRCUIT BREAKER -{CIRCUIT_BREAKER_PCT:.0f}% — FECHO DE EMERGÊNCIA</b>\n"
                                f"Par: <code>{sym}</code> | {dir_txt}\n"
@@ -1025,7 +1073,7 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                         log.info("🔒 STEP TRAIL GRAU %d — $%.0f atingido → piso $%.0f | %s SL=%.5f",
                                  grau, trigger_usd, lock_usd, sym, lock_px)
                         try:
-                            okx_cancel_all_algos(inst_id, pos_side)
+                            cancel_all_open_orders(inst_id)
                             time.sleep(1)
                             okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
                             okx_trailing_stop(inst_id, pos_side, pos_sz,
@@ -1460,7 +1508,7 @@ def cmd_gv5() -> str:
 
         grau = tier_atingido + 1
         try:
-            okx_cancel_all_algos(inst_id, pos_side); time.sleep(1)
+            cancel_all_open_orders(inst_id); time.sleep(1)
             okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
             # Re-arma trailing logo acima do mark actual
             act_px = mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy" else mark_px * (1 - TRAIL_ACTIVATE_PCT/100)
@@ -1626,7 +1674,7 @@ def cmd_panic() -> str:
                 pos = okx_get_position(inst_id, ps)
                 if pos and float(pos.get("pos", 0) or 0) != 0:
                     sz = int(float(pos["pos"]))
-                    okx_cancel_all_algos(inst_id, ps)
+                    cancel_all_open_orders(inst_id)
                     time.sleep(0.3)
                     okx_close_market(inst_id, ps, sz)
                     closed.append(f"{inst_id.replace('-USDT-SWAP','')} {ps.upper()}")
@@ -2158,6 +2206,27 @@ def telegram_commands_loop() -> None:
                             target=_fire, args=(inst_id, sig_side, sig_name),
                             kwargs={"tag": sig_tag}, daemon=True).start()
 
+                # ── /clab — cancela TODAS as ordens abertas na OKX (manual) ──────
+                elif cmd == "clab":
+                    tg("🧹 <b>VARREDURA EM CURSO...</b>\nCancelando todas as ordens abertas na OKX...", chat_id)
+                    total   = 0
+                    details = []
+                    for sym_id in ALL_SYMS:
+                        try:
+                            n = cancel_all_open_orders(sym_id)
+                            if n > 0:
+                                details.append(f"  {sym_id.replace('-USDT-SWAP','')} — {n} ordens")
+                            total += n
+                        except Exception as e:
+                            details.append(f"  ⚠️ {sym_id.replace('-USDT-SWAP','')}: {e}")
+                    if total == 0 and not any("⚠️" in d for d in details):
+                        tg("✅ <b>/clab — Livro já limpo.</b>\nNenhuma ordem aberta encontrada.", chat_id)
+                    else:
+                        detail_txt = "\n".join(details) if details else "  (sem detalhes)"
+                        tg(f"🧹 <b>/clab — Varredura completa!</b>\n"
+                           f"Total cancelado: <b>{total} ordens</b>\n{detail_txt}", chat_id)
+                    log.info("/clab manual: %d ordens canceladas", total)
+
                 # ── /help ──────────────────────────────────────────────────────
                 elif cmd in ("help", "ajuda"):
                     tg("🤖 <b>V9 COMMANDER — FULL SQUAD (10 estratégias)</b>\n\n"
@@ -2183,6 +2252,7 @@ def telegram_commands_loop() -> None:
                        "/backtest — Backtest real 100 dias OKX (~40s)\n\n"
                        "<b>Acção manual:</b>\n"
                        "/gv5 — Força Step Trail V5 (trava lucros agora)\n"
+                       "/clab — 🧹 Cancela TODAS as ordens abertas na OKX\n"
                        "/go[coin] — Confirma sinal pendente (120s)\n"
                        "  /goeth  /gosol  /goxrp  /goada  /godoge  /gobnb\n"
                        "/force [coin] — Ordem mercado bypass filtros\n"
