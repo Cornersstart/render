@@ -91,11 +91,11 @@ OB_SL_PCT      = 1.0   # SL da estratégia OB (diferente do DUO)
 # ── STEP TRAILING V5 — 5 graus baseados em PnL não realizado (USDT) ───────────
 # Cada tuple: (trigger_usd, lock_usd) — ao atingir trigger, SL sobe para lock
 STEP_TRAIL_LEVELS: list[tuple[float, float]] = [
-    (25.0,  15.0),   # Grau 1: hit +$25  → piso +$15
-    (40.0,  25.0),   # Grau 2: hit +$40  → piso +$25
-    (60.0,  40.0),   # Grau 3: hit +$60  → piso +$40
-    (80.0,  60.0),   # Grau 4: hit +$80  → piso +$60
-    (100.0, 80.0),   # Grau 5: hit +$100 → piso +$80
+    (25.0,  20.0),   # Grau 1: hit +$25  → piso +$20
+    (40.0,  28.0),   # Grau 2: hit +$40  → piso +$28
+    (60.0,  38.0),   # Grau 3: hit +$60  → piso +$38
+    (80.0,  52.0),   # Grau 4: hit +$80  → piso +$52
+    (100.0, 68.0),   # Grau 5: hit +$100 → piso +$68
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -109,7 +109,7 @@ STRICT_SL_PCT = 1.5
 # Folga de 1pp evita corrida dupla CB-vs-exchange-SL no mesmo tick.
 HOLD_SL_PCT   = 5.0
 CIRCUIT_BREAKER_PCT = 4.0   # global — monitor fecha SEMPRE a -4% em preço (reduzido de 7%)
-PROFIT_LOCK_USD     = 25.0  # TP fixo — fecha 100% ao atingir +$25 USDT não realizado
+PROFIT_LOCK_USD     = 0.0   # 0 = desactivado — Step Trail V5 trata dos lucros
 
 # ── E06 SUPERTREND (SOL 15m) ──────────────────────────────────────────────────
 ST_PERIOD = 10
@@ -157,6 +157,11 @@ MONTHLY_GOAL_USD = 600.0
 
 # ── Panic pause ────────────────────────────────────────────────────────────
 _panic_until: float = 0.0
+
+# ── Estratégias habilitadas — /pausar /activar individuais ───────────────────
+_STRATEGY_KEYS = ("ichimoku", "supertrend", "rsidiv", "vwap", "engolfo", "ob", "fvg")
+_strategy_enabled: dict[str, bool] = {k: True for k in _STRATEGY_KEYS}
+_strategy_lock = threading.Lock()
 
 STATE_FILE = Path(__file__).parent / "bot_state.json"
 
@@ -947,8 +952,8 @@ def _monitor(inst_id: str, pos_side: str, side: str,
         try:
             pos = okx_get_position(inst_id, pos_side)
 
-            # ── 🎯 PROFIT LOCK — TP FIXO $25 — fecha imediatamente ──────────────
-            if pos is not None:
+            # ── 🎯 PROFIT LOCK — só activo se PROFIT_LOCK_USD > 0 ───────────────
+            if pos is not None and PROFIT_LOCK_USD > 0:
                 upl_tp  = float(pos.get("upl", 0) or 0)
                 pos_sz_tp = int(float(pos.get("pos", qty) or qty))
                 if upl_tp >= PROFIT_LOCK_USD:
@@ -1027,12 +1032,18 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                                               mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy"
                                               else mark_px * (1 - TRAIL_ACTIVATE_PCT/100))
                             _step_trail_tier += 1
-                            tg(f"🔒 <b>STEP TRAIL GRAU {grau} ACTIVADO</b>\n"
+                            grau_bar = "🟢" * grau + "⚪" * (len(STEP_TRAIL_LEVELS) - grau)
+                            prox_txt = (
+                                f"Próximo grau: +${STEP_TRAIL_LEVELS[_step_trail_tier][0]:.0f} → piso +${STEP_TRAIL_LEVELS[_step_trail_tier][1]:.0f}"
+                                if _step_trail_tier < len(STEP_TRAIL_LEVELS) else "🏆 GRAU MÁXIMO ATINGIDO!"
+                            )
+                            dist_usd = upl - lock_usd
+                            tg(f"🔒 <b>STEP TRAIL GRAU {grau}/5</b> {grau_bar}\n"
                                f"Par: <code>{sym}</code> | {dir_txt}\n"
-                               f"Lucro actual: <b>${upl:+.2f} USDT</b> (trigger ${trigger_usd:.0f})\n"
-                               f"🛡️ SL blindado em: <code>{lock_px:.5f}</code> (garante ${lock_usd:.0f})\n"
-                               f"📡 Trailing continua activo — próximo grau: "
-                               + (f"${STEP_TRAIL_LEVELS[_step_trail_tier][0]:.0f}" if _step_trail_tier < len(STEP_TRAIL_LEVELS) else "MAX atingido 🏆"))
+                               f"💰 Lucro actual: <b>${upl:+.2f}</b> → SL move para: <b>+${lock_usd:.0f}</b>\n"
+                               f"🛡️ Garantido: <b>${lock_usd:.0f} USDT</b> | Margem: ${dist_usd:.0f}\n"
+                               f"📍 SL price: <code>{lock_px:.5f}</code>\n"
+                               f"📡 {prox_txt}")
                         except Exception as e:
                             log.error("step trail grau %d: %s — voltando a tentar", grau, e)
 
@@ -1337,52 +1348,60 @@ def cmd_radar() -> str:
 
 
 def cmd_lpd() -> str:
-    """P&L realizado nas últimas 24 horas (nunca antes de 18 Abr 2026)."""
+    """P&L realizado nas últimas 24 horas via positions-history (P&L real por posição fechada)."""
     if not _has_creds(): return "❌ Sem credenciais OKX."
-    # Piso absoluto: 18 Abril 2026 00:00 UTC — ignora trades de teste anteriores
     PNL_FLOOR_MS = int(datetime(2026, 4, 18, tzinfo=timezone.utc).timestamp() * 1000)
     cutoff = max(int((time.time() - 86400) * 1000), PNL_FLOOR_MS)
-    path   = "/api/v5/trade/fills-history?instType=SWAP&limit=100"
+    path = "/api/v5/account/positions-history?instType=SWAP&limit=100"
     try:
-        r     = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=10)
-        fills = [f for f in r.json().get("data", []) if int(f["ts"]) >= cutoff]
-        if not fills:
-            return "📭 <b>Sem trades realizados nas últimas 24h.</b>"
-        total = sum(float(f.get("pnl", 0) or 0) for f in fills)
-        fee   = sum(float(f.get("fee", 0) or 0) for f in fills)
-        net   = total + fee
+        r    = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=10)
+        data = r.json()
+        if data.get("code") != "0":
+            return f"❌ /lpd API: {data.get('msg')}"
+        pos_list = [p for p in data.get("data", []) if int(p.get("uTime", 0)) >= cutoff]
+        if not pos_list:
+            return "📭 <b>Sem posições fechadas nas últimas 24h.</b>"
+        gross = sum(float(p.get("pnl", 0) or 0) for p in pos_list)
+        fee   = sum(float(p.get("fee", 0) or 0) for p in pos_list)
+        fund  = sum(float(p.get("fundingFee", 0) or 0) for p in pos_list)
+        net   = gross + fee + fund
         icon  = "✅" if net >= 0 else "🔴"
+        fee_str  = f"${fee:+.2f}" if fee != 0 else "$0.00"
+        fund_str = f"${fund:+.2f}" if fund != 0 else "$0.00"
         return (f"{icon} <b>P&amp;L últimas 24h</b>\n"
-                f"Trades: <b>{len(fills)}</b>\n"
-                f"Gross P&amp;L: <b>${total:+.2f}</b>\n"
-                f"Comissões: <b>${fee:+.2f}</b>\n"
+                f"Posições fechadas: <b>{len(pos_list)}</b>\n"
+                f"Gross P&amp;L: <b>${gross:+.2f}</b>\n"
+                f"Comissões: <b>{fee_str}</b> | Funding: <b>{fund_str}</b>\n"
                 f"P&amp;L Líquido: <b>${net:+.2f} USDT</b>")
     except Exception as e:
         return f"❌ Erro /lpd: {e}"
 
 
 def cmd_meta() -> str:
-    """Progresso em relação à meta de $600/mês (desde 18 Abr 2026)."""
+    """Progresso em relação à meta de $600/mês (desde 18 Abr 2026) via positions-history."""
     if not _has_creds(): return "❌ Sem credenciais OKX."
     now   = datetime.now(timezone.utc)
-    # Hardcoded: apenas trades a partir de 18 Abril 2026 — ignora trades de teste
     start = int(datetime(2026, 4, 18, tzinfo=timezone.utc).timestamp() * 1000)
-    path  = "/api/v5/trade/fills-history?instType=SWAP&limit=100"
+    path  = "/api/v5/account/positions-history?instType=SWAP&limit=100"
     try:
-        r     = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=10)
-        fills = [f for f in r.json().get("data", []) if int(f["ts"]) >= start]
-        total = sum(float(f.get("pnl", 0) or 0) for f in fills)
-        fee   = sum(float(f.get("fee", 0) or 0) for f in fills)
-        net   = total + fee
-        pct   = min(net / MONTHLY_GOAL_USD * 100, 100.0) if MONTHLY_GOAL_USD > 0 else 0.0
+        r    = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=10)
+        data = r.json()
+        if data.get("code") != "0":
+            return f"❌ /meta API: {data.get('msg')}"
+        pos_list = [p for p in data.get("data", []) if int(p.get("uTime", 0)) >= start]
+        gross = sum(float(p.get("pnl", 0) or 0) for p in pos_list)
+        fee   = sum(float(p.get("fee", 0) or 0) for p in pos_list)
+        fund  = sum(float(p.get("fundingFee", 0) or 0) for p in pos_list)
+        net   = gross + fee + fund
+        pct    = min(net / MONTHLY_GOAL_USD * 100, 100.0) if MONTHLY_GOAL_USD > 0 else 0.0
         filled = int(pct / 5)
-        bar   = "█" * filled + "░" * (20 - filled)
-        icon  = "🏆" if pct >= 100 else ("🔥" if pct >= 50 else "📈")
+        bar    = "█" * filled + "░" * (20 - filled)
+        icon   = "🏆" if pct >= 100 else ("🔥" if pct >= 50 else "📈")
         return (f"{icon} <b>META MENSAL — {now.strftime('%B %Y')}</b>\n"
                 f"<code>[{bar}]</code> {pct:.1f}%\n"
                 f"Realizado: <b>${net:+.2f}</b> / Meta: <b>${MONTHLY_GOAL_USD:.0f}</b>\n"
                 f"Faltam: <b>${max(MONTHLY_GOAL_USD - net, 0):.2f} USDT</b>\n"
-                f"Trades desde 18 Abr: {len(fills)}")
+                f"Posições desde 18 Abr: {len(pos_list)}")
     except Exception as e:
         return f"❌ Erro /meta: {e}"
 
@@ -1958,8 +1977,8 @@ def telegram_commands_loop() -> None:
                        f"⚙️ Alavancagem actual: <b>{LEVERAGE}×</b>", chat_id)
                     log.info("Bot autorizado via Telegram")
 
-                elif cmd in ("pause", "stop", "off", "pausar"):
-                    # /pause = pausa PERMANENTE — só /start desbloqueia (sem auto-resume)
+                elif cmd in ("pause", "stop", "off"):
+                    # /pause = pausa PERMANENTE do bot — só /start desbloqueia
                     with _auth_lock: _bot_authorized = False
                     _save_state(False)
                     _panic_until = 0.0   # cancela qualquer auto-resume pendente
@@ -1967,6 +1986,78 @@ def telegram_commands_loop() -> None:
                        "O bot <b>não retoma automaticamente</b>.\n"
                        "Usa <code>/start</code> para autorizar novamente.", chat_id)
                     log.info("Bot pausado (permanente) via Telegram")
+
+                # ── /pausar [estrategia|tudo] — pausa estratégia individual ───
+                elif cmd == "pausar":
+                    if not args:
+                        valid = " | ".join(_STRATEGY_KEYS)
+                        tg(f"❌ Especifica a estratégia.\n"
+                           f"Ex: <code>/pausar engolfo</code>\n"
+                           f"Opções: <code>{valid} | tudo</code>\n"
+                           f"(Para pausar o bot inteiro: <code>/pause</code>)", chat_id)
+                    else:
+                        key = args[0]
+                        with _strategy_lock:
+                            if key == "tudo":
+                                for k in _STRATEGY_KEYS:
+                                    _strategy_enabled[k] = False
+                                tg("⛔ <b>Todas as estratégias PAUSADAS.</b>\n"
+                                   "Usa <code>/activar tudo</code> para reactivar.\n"
+                                   "(Bot continua activo — apenas sem entrar em novas trades)", chat_id)
+                                log.info("Todas as estratégias pausadas via /pausar tudo")
+                            elif key in _strategy_enabled:
+                                _strategy_enabled[key] = False
+                                tg(f"⛔ Estratégia <b>{key.upper()}</b> pausada.\n"
+                                   f"Usa <code>/activar {key}</code> para reactivar.", chat_id)
+                                log.info("Estratégia %s pausada via Telegram", key)
+                            else:
+                                valid = " | ".join(_STRATEGY_KEYS)
+                                tg(f"❌ Estratégia <b>{key}</b> não reconhecida.\n"
+                                   f"Opções: <code>{valid} | tudo</code>", chat_id)
+
+                # ── /activar [estrategia|tudo] — reactiva estratégia ───────────
+                elif cmd == "activar":
+                    if not args:
+                        valid = " | ".join(_STRATEGY_KEYS)
+                        tg(f"❌ Especifica a estratégia.\n"
+                           f"Ex: <code>/activar fvg</code>\n"
+                           f"Opções: <code>{valid} | tudo</code>", chat_id)
+                    else:
+                        key = args[0]
+                        with _strategy_lock:
+                            if key == "tudo":
+                                for k in _STRATEGY_KEYS:
+                                    _strategy_enabled[k] = True
+                                tg("✅ <b>Todas as estratégias ACTIVADAS.</b>", chat_id)
+                                log.info("Todas as estratégias reactivadas via /activar tudo")
+                            elif key in _strategy_enabled:
+                                _strategy_enabled[key] = True
+                                tg(f"✅ Estratégia <b>{key.upper()}</b> reactivada.", chat_id)
+                                log.info("Estratégia %s reactivada via Telegram", key)
+                            else:
+                                valid = " | ".join(_STRATEGY_KEYS)
+                                tg(f"❌ Estratégia <b>{key}</b> não reconhecida.\n"
+                                   f"Opções: <code>{valid} | tudo</code>", chat_id)
+
+                # ── /estrategias — lista estado ON/OFF de cada estratégia ───────
+                elif cmd == "estrategias":
+                    with _strategy_lock:
+                        snap = dict(_strategy_enabled)
+                    labels = {
+                        "ichimoku":   "🥇 POL  ICHIMOKU 1H",
+                        "supertrend": "🌊 SOL  SUPERTREND 15m",
+                        "rsidiv":     "🎯 XRP  RSI DIV + VWAP 15m",
+                        "vwap":       "💧 ETH  VWAP KISS 15m",
+                        "engolfo":    "🔥 SOL  ENGOLFO 15m",
+                        "ob":         "🛡️ ADA/XRP/DOGE  ORDER BLOCK 1H",
+                        "fvg":        "🔷 SOL/BNB/ETH  FVG 15m",
+                    }
+                    lines = ["📋 <b>ESTRATÉGIAS — estado actual</b>\n"]
+                    for k, label in labels.items():
+                        icon = "✅ ON " if snap[k] else "⛔ OFF"
+                        lines.append(f"{icon} — {label}")
+                    lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>")
+                    tg("\n".join(lines), chat_id)
 
                 # ── /subir6x — muda alavancagem para 6× ──────────────────────
                 elif cmd == "subir6x":
@@ -2070,29 +2161,35 @@ def telegram_commands_loop() -> None:
                 # ── /help ──────────────────────────────────────────────────────
                 elif cmd in ("help", "ajuda"):
                     tg("🤖 <b>V9 COMMANDER — FULL SQUAD (10 estratégias)</b>\n\n"
-                       "<b>Controlo:</b>\n"
-                       "/start — Autorizar bot\n"
+                       "<b>Controlo do bot:</b>\n"
+                       "/start — ✅ Autorizar bot\n"
                        "/pause — ⛔ Pausa PERMANENTE (só /start desbloqueia)\n"
                        "/panic — 🚨 Fecha tudo + pausa 5min\n\n"
+                       "<b>Estratégias ON/OFF:</b>\n"
+                       "/estrategias — Lista quais estão ON/OFF\n"
+                       "/pausar [chave] — Pausa estratégia individual\n"
+                       "/activar [chave] — Reactiva estratégia individual\n"
+                       "  Chaves: <code>ichimoku | supertrend | rsidiv | vwap | engolfo | ob | fvg | tudo</code>\n\n"
                        "<b>Alavancagem:</b>\n"
                        "/subir6x — Mudar para 6× (aplica imediatamente)\n"
                        "/subir7x — Mudar para 7× (aplica imediatamente)\n\n"
                        "<b>Info &amp; análise:</b>\n"
-                       "/status — Estado + saldo + alavancagem actual\n"
-                       "/tp — P&amp;L posições abertas\n"
-                       "/radar — RSI/proximidade triggers\n"
-                       "/lpd — P&amp;L realizado 24h\n"
+                       "/status (ou /s) — Estado + saldo + alavancagem\n"
+                       "/tp — P&amp;L posições abertas ao vivo\n"
+                       "/radar — Proximidade triggers + score de confiança\n"
+                       "/lpd — P&amp;L realizado últimas 24h\n"
                        "/meta — Progresso meta $600/mês\n"
-                       "/risco — Análise táctica (book + SL + veredito)\n\n"
+                       "/risco — Análise táctica (book + SL + veredito)\n"
+                       "/backtest — Backtest real 100 dias OKX (~40s)\n\n"
                        "<b>Acção manual:</b>\n"
+                       "/gv5 — Força Step Trail V5 (trava lucros agora)\n"
                        "/go[coin] — Confirma sinal pendente (120s)\n"
                        "  /goeth  /gosol  /goxrp  /goada  /godoge  /gobnb\n"
                        "/force [coin] — Ordem mercado bypass filtros\n"
-                       "  Ex: <code>/force bnb</code>  (RSI 15m decide LONG/SHORT)\n"
-                       "/gv5 — Força check Step Trail V5 e trava lucros\n\n"
-                       "🥇 POL/SOL/XRP/ETH/BNB/ADA/DOGE — TODOS AUTOMÁTICOS\n"
-                       "(sem necessidade de /go[coin] — entra sozinho ao sinal)\n\n"
-                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  Step Trail V5  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 30min", chat_id)
+                       "  Ex: <code>/force bnb</code>  (RSI 15m decide LONG/SHORT)\n\n"
+                       "🥇 POL/SOL/XRP/ETH/BNB/ADA/DOGE — TODOS AUTOMÁTICOS\n\n"
+                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD SL {HOLD_SL_PCT:.0f}%  |  STRICT SL {STRICT_SL_PCT:.1f}%\n"
+                       f"Step Trail V5  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 30min", chat_id)
 
         except Exception as e:
             log.warning("tg_polling: %s", e)
@@ -2172,25 +2269,30 @@ def duo_elite_loop() -> None:
 
             fired = False
 
+            # Snapshot thread-safe do estado das estratégias para este ciclo
+            with _strategy_lock:
+                st_enabled = dict(_strategy_enabled)
+
             # ╔══════════════ GOLDEN DOCTRINE PRIORITY ═══════════════════════╗
             # ── 🥇 PRIORIDADE 1: POL — ICHIMOKU 1H (97.4% hit, HOLD) ────────
-            try:
-                sig = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
-                if sig:
-                    dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                    log.info("🥇 ICHIMOKU POL → %s", sig.upper())
-                    tg(f"🥇 <b>GOLDEN — POL ICHIMOKU FIRED</b>\n"
-                       f"Par: <code>POL-USDT-SWAP</code> | Sinal: <b>ICHIMOKU 1H</b>\n"
-                       f"Direção: <b>{dir_scout}</b>  | Hit histórico: <b>97.4%</b>\n"
-                       f"💰 Hold the hand — alvo $20 NET. Circuit breaker -{CIRCUIT_BREAKER_PCT:.0f}%.")
-                    fired = _fire(GOLD_POL, sig, "ICHIMOKU POL", tag="🥇 GOLDEN POL")
-                else:
-                    log.info("[POL] sem sinal")
-            except Exception as e:
-                log.error("[POL] %s", e)
+            if not fired and st_enabled["ichimoku"]:
+                try:
+                    sig = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
+                    if sig:
+                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                        log.info("🥇 ICHIMOKU POL → %s", sig.upper())
+                        tg(f"🥇 <b>GOLDEN — POL ICHIMOKU FIRED</b>\n"
+                           f"Par: <code>POL-USDT-SWAP</code> | Sinal: <b>ICHIMOKU 1H</b>\n"
+                           f"Direção: <b>{dir_scout}</b>  | Hit histórico: <b>97.4%</b>\n"
+                           f"💰 Hold the hand — alvo $20 NET. Circuit breaker -{CIRCUIT_BREAKER_PCT:.0f}%.")
+                        fired = _fire(GOLD_POL, sig, "ICHIMOKU POL", tag="🥇 GOLDEN POL")
+                    else:
+                        log.info("[POL] sem sinal")
+                except Exception as e:
+                    log.error("[POL] %s", e)
 
             # ── 🌊 PRIORIDADE 2: SOL — SUPERTREND 15m (95% hit, HOLD) ───────
-            if not fired:
+            if not fired and st_enabled["supertrend"]:
                 try:
                     sig = supertrend_signal(okx_candles(DUO_SOL))
                     if sig:
@@ -2206,7 +2308,7 @@ def duo_elite_loop() -> None:
                     log.error("[SOL/ST] %s", e)
 
             # ── 🎯 PRIORIDADE 3: XRP — RSI DIV + VWAP 15m (PF 2.38, STRICT) ─
-            if not fired:
+            if not fired and st_enabled["rsidiv"]:
                 try:
                     sig = rsi_div_vwap_signal(okx_candles(SHIELD_XRP))
                     if sig:
@@ -2223,7 +2325,7 @@ def duo_elite_loop() -> None:
             # ╚═══════════════════════════════════════════════════════════════╝
 
             # ── 4: ETH — VWAP KISS ────────────────────────────────────────────
-            if not fired:
+            if not fired and st_enabled["vwap"]:
                 try:
                     sig = vwap_kiss_signal(okx_candles(DUO_ETH))
                     if sig:
@@ -2239,7 +2341,7 @@ def duo_elite_loop() -> None:
                     log.error("[ETH] %s", e)
 
             # ── 5: SOL — ENGOLFO ──────────────────────────────────────────────
-            if not fired:
+            if not fired and st_enabled["engolfo"]:
                 try:
                     sig = engolfo_signal(okx_candles(DUO_SOL))
                     if sig:
@@ -2255,7 +2357,7 @@ def duo_elite_loop() -> None:
                     log.error("[SOL] %s", e)
 
             # ── 6: ADA — ORDER BLOCK DEFENSE ──────────────────────────────────
-            if not fired:
+            if not fired and st_enabled["ob"]:
                 try:
                     sig = order_block_signal(okx_candles(SHIELD_ADA, bar="1H", limit=100))
                     if sig:
@@ -2271,7 +2373,7 @@ def duo_elite_loop() -> None:
                     log.error("[ADA] %s", e)
 
             # ── 7: XRP — ORDER BLOCK DEFENSE ──────────────────────────────────
-            if not fired:
+            if not fired and st_enabled["ob"]:
                 try:
                     sig = order_block_signal(okx_candles(SHIELD_XRP, bar="1H", limit=100))
                     if sig:
@@ -2287,7 +2389,7 @@ def duo_elite_loop() -> None:
                     log.error("[XRP/OB] %s", e)
 
             # ── 7b: DOGE — ORDER BLOCK DEFENSE (STRICT 1.5%) ─────────────────
-            if not fired:
+            if not fired and st_enabled["ob"]:
                 try:
                     sig = order_block_signal(okx_candles(GOLD_DOGE, bar="1H", limit=100))
                     if sig:
@@ -2304,7 +2406,7 @@ def duo_elite_loop() -> None:
 
             # ╔══════════════ FVG EXPANSION SQUAD (V9) ═══════════════════════╗
             # ── 8: SOL — FAIR VALUE GAP 15m (70.6% hit / ROI +70.4%) ────────
-            if not fired:
+            if not fired and st_enabled["fvg"]:
                 try:
                     sig = fvg_signal(okx_candles(DUO_SOL), DUO_SOL)
                     if sig:
@@ -2321,7 +2423,7 @@ def duo_elite_loop() -> None:
                     log.error("[SOL/FVG] %s", e)
 
             # ── 9: BNB — FAIR VALUE GAP 15m (65.2% hit / ROI +48.8%) ────────
-            if not fired:
+            if not fired and st_enabled["fvg"]:
                 try:
                     sig = fvg_signal(okx_candles(FVG_BNB), FVG_BNB)
                     if sig:
@@ -2338,7 +2440,7 @@ def duo_elite_loop() -> None:
                     log.error("[BNB/FVG] %s", e)
 
             # ── 10: ETH — FAIR VALUE GAP 15m (73.9% hit / ROI +34.9%) ───────
-            if not fired:
+            if not fired and st_enabled["fvg"]:
                 try:
                     sig = fvg_signal(okx_candles(DUO_ETH), DUO_ETH)
                     if sig:
