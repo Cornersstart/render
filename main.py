@@ -157,6 +157,7 @@ MONTHLY_GOAL_USD = 600.0
 
 # ── Panic pause ────────────────────────────────────────────────────────────
 _panic_until: float = 0.0
+_btc_sentinel_active: bool = True
 
 # ── Estratégias habilitadas — /pausar /activar individuais ───────────────────
 _STRATEGY_KEYS = ("ichimoku", "supertrend", "rsidiv", "vwap", "engolfo", "ob", "fvg")
@@ -451,10 +452,10 @@ def cancel_all_open_orders(inst_id: str) -> int:
     except Exception as e:
         log.warning("cancel_all_open_orders regular %s: %s", sym, e)
 
-    # 2) Algo orders (SL / trailing stop) — ambos os lados (long + short)
+    # 2) Algo orders (SL / TP / OCO / trigger / trailing) — todos os tipos, ambos os lados
     try:
         qpath  = "/api/v5/trade/orders-algo-pending"
-        params = f"?instType=SWAP&instId={inst_id}&ordType=conditional,move_order_stop"
+        params = f"?instType=SWAP&instId={inst_id}&ordType=conditional,oco,trigger,move_order_stop"
         r      = requests.get(f"https://www.okx.com{qpath}{params}",
                               headers=_headers("GET", f"{qpath}{params}"), timeout=8)
         algos = r.json().get("data", [])
@@ -468,7 +469,8 @@ def cancel_all_open_orders(inst_id: str) -> int:
     except Exception as e:
         log.warning("cancel_all_open_orders algos %s: %s", sym, e)
 
-    log.info("🧹 %s — Varredura de convés completa. Todas as ordens pendentes canceladas.", sym)
+    log.info("🧹 %s — Varredura completa: Ordens normais e ordens de gatilho (TP/SL) eliminadas. Total: %d",
+             sym, cancelled)
     return cancelled
 
 # ── OKX — SL inicial (protecção antes do trailing activar) ────────────────────
@@ -986,6 +988,28 @@ def fvg_signal(df: pd.DataFrame, inst_id: str) -> str | None:
 # MONITOR — aguarda fecho de posição em thread separada
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _get_real_exit(inst_id: str) -> tuple[float, float]:
+    """Retorna (closeAvgPx, pnl_líquido) da última posição fechada via positions-history.
+
+    pnl_líquido = realizedPnl + fee + fundingFee (já inclui custos).
+    Retorna (0.0, 0.0) em caso de falha — monitor usa fallback pelo mark price.
+    """
+    try:
+        path = f"/api/v5/account/positions-history?instType=SWAP&instId={inst_id}&limit=1"
+        r    = requests.get(f"https://www.okx.com{path}",
+                            headers=_headers("GET", path), timeout=8)
+        data = r.json().get("data", [])
+        if data:
+            p       = data[0]
+            pnl     = float(p.get("realizedPnl", 0) or 0)
+            fee     = float(p.get("fee",         0) or 0)
+            fund    = float(p.get("fundingFee",  0) or 0)
+            exit_px = float(p.get("closeAvgPx",  0) or 0)
+            return exit_px, round(pnl + fee + fund, 2)
+    except Exception as e:
+        log.warning("_get_real_exit %s: %s", inst_id, e)
+    return 0.0, 0.0
+
 def _monitor(inst_id: str, pos_side: str, side: str,
              entry: float, sl_px: float, activate_px: float,
              sym: str, dir_txt: str, bal: float, qty: int,
@@ -1105,19 +1129,24 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                 continue
 
             # 3 Nones consecutivos → posição confirmada fechada
-            try: exit_px = okx_ticker(inst_id)
-            except Exception: exit_px = entry
-            if side == "buy":
-                pnl_pct = (exit_px - entry) / entry * 100 * LEVERAGE
+            # Tenta PnL real da OKX (fill price + fees); fallback: mark price
+            exit_px, pnl_usd = _get_real_exit(inst_id)
+            if exit_px > 0:
+                pnl_pct = ((exit_px - entry) / entry * 100 * LEVERAGE if side == "buy"
+                           else (entry - exit_px) / entry * 100 * LEVERAGE)
             else:
-                pnl_pct = (entry - exit_px) / entry * 100 * LEVERAGE
-            pnl_usd = bal * pnl_pct / 100
-            win     = pnl_pct > 0
+                try: exit_px = okx_ticker(inst_id)
+                except Exception: exit_px = entry
+                pnl_pct = ((exit_px - entry) / entry * 100 * LEVERAGE if side == "buy"
+                           else (entry - exit_px) / entry * 100 * LEVERAGE)
+                pnl_usd = round(bal * pnl_pct / 100, 2)
+            win = pnl_usd > 0
 
+            # ── mensagem de saída limpa ───────────────────────────────────────
             if _step_trail_tier > 0:
-                icon   = "✅" if win else "⚠️"
-                result = (f"SAÍDA COM LUCRO 🎯 (Step Trail Grau {_step_trail_tier} activo)"
-                          if win else f"SAÍDA ABAIXO DO PISO — Grau {_step_trail_tier} ⚠️")
+                grau_bar = "🟢" * _step_trail_tier + "⚪" * (len(STEP_TRAIL_LEVELS) - _step_trail_tier)
+                icon     = "✅" if win else "⚠️"
+                result   = f"STEP TRAIL GRAU {_step_trail_tier}/5 {grau_bar}"
             else:
                 icon   = "🎯" if win else "💥"
                 result = "SAÍDA COM LUCRO 🎯" if win else "SAÍDA COM PERDA 💥"
@@ -1125,8 +1154,10 @@ def _monitor(inst_id: str, pos_side: str, side: str,
             tg(f"{icon} <b>{tag} — {result}</b>\n"
                f"Par: <code>{sym}</code> | {dir_txt}\n"
                f"Entrada: <code>{entry:.5f}</code> → Saída: <code>{exit_px:.5f}</code>\n"
-               f"P&L: <b>${pnl_usd:+.2f} USDT</b> ({pnl_pct:+.2f}%)\n"
+               f"P&L Real: <b>${pnl_usd:+.2f} USDT</b> ({pnl_pct:+.2f}%)\n"
                f"⏳ Cooldown 30 min activado.")
+            # variáveis locais (_step_trail_tier, _none_streak) são reiniciadas
+            # automaticamente na próxima chamada a _monitor()
 
             log.info("📊 [%s] %s fechado | exit=%.5f P&L $%.2f (%.2f%%) | step_tier=%d",
                      tag, sym, exit_px, pnl_usd, pnl_pct, _step_trail_tier)
@@ -1143,6 +1174,41 @@ def _monitor(inst_id: str, pos_side: str, side: str,
 # EXECUÇÃO DE TRADE
 # ══════════════════════════════════════════════════════════════════════════════
 
+def get_btc_sentiment() -> tuple[str, bool, float, float, float]:
+    """Retorna (sentiment, blocked, price, ema20, rsi).
+
+    sentiment : "BULLISH" | "BEARISH" | "NEUTRO"
+    blocked   : True se RSI > 70 ou < 30 (zona de exaustão)
+    price/ema20/rsi : valores calculados (0.0 em caso de falha)
+    """
+    try:
+        r = requests.get(
+            f"{OKX_BASE}/market/candles?instId=BTC-USDT-SWAP&bar=15m&limit=50",
+            timeout=8
+        )
+        data = r.json()
+        if data.get("code") != "0":
+            return ("NEUTRO", False, 0.0, 0.0, 0.0)
+        df = pd.DataFrame(data["data"],
+             columns=["ts","open","high","low","close","vol",
+                      "volCcy","volCcyQuote","confirm"])
+        df["close"] = pd.to_numeric(df["close"])
+        closes = df["close"].iloc[::-1].reset_index(drop=True)
+        ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
+        price = closes.iloc[-1]
+        delta = closes.diff()
+        gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+        loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+        rsi   = 100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10)))
+        blocked   = rsi > 70 or rsi < 30
+        sentiment = "BULLISH" if price > ema20 else "BEARISH"
+        log.info("🛡️ BTC SENTINEL: price=%.0f ema20=%.0f rsi=%.1f → %s %s",
+                 price, ema20, rsi, sentiment, "BLOQUEADO" if blocked else "OK")
+        return (sentiment, blocked, float(price), float(ema20), float(rsi))
+    except Exception as e:
+        log.warning("BTC Sentinel erro: %s — permitindo entrada", e)
+        return ("NEUTRO", False, 0.0, 0.0, 0.0)
+
 def _fire(inst_id: str, side: str, signal_name: str,
           tag: str = "DUO ELITE", sl_pct: float | None = None) -> bool:
     """Executa ordem de mercado + SL inicial + Trailing Stop.
@@ -1152,7 +1218,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
       - STRICT pairs (ADA/XRP/DOGE): SL = STRICT_SL_PCT (1.5%) — não segurar
       - Outros: usa sl_pct passado ou DUO_SL_PCT
     """
-    global _duo_in_trade, _lockdown_until
+    global _duo_in_trade, _lockdown_until, _btc_sentinel_active
     # ── Routing automático do SL pela classificação do par ────────────────
     if sl_pct is None:
         if   inst_id in HOLD_PAIRS:   sl_pct = HOLD_SL_PCT
@@ -1166,6 +1232,29 @@ def _fire(inst_id: str, side: str, signal_name: str,
     # (anti ping-pong: evita 7 retries do mesmo sinal a cada 2 min)
     with _duo_lock:
         _lockdown_until = max(_lockdown_until, time.time() + LOCKDOWN_SECS)
+
+    # ── BTC SENTINEL — filtro de maré ────────────────────────────────────────
+    if _btc_sentinel_active:
+        btc_sentiment, btc_blocked, _btc_px, _btc_ema, _btc_rsi = get_btc_sentiment()
+        log.debug("[DEBUG] Sentinel consultado: BTC está %s (RSI=%.1f, bloqueado=%s)",
+                  btc_sentiment, _btc_rsi, btc_blocked)
+        if btc_blocked:
+            log.info("[SENTINEL] BTC RSI extremo (%.1f) — %s bloqueado", _btc_rsi, sym)
+            tg(f"[SENTINEL 🛡️] <b>{sym} bloqueado</b>\n"
+               f"BTC RSI {_btc_rsi:.1f} — zona de exaustão. Aguardando normalização.")
+            with _duo_lock:
+                _lockdown_until = max(_lockdown_until, time.time() + 300)
+            return False
+        if btc_sentiment == "BULLISH" and side == "sell":
+            log.info("[SENTINEL 🛡️] %s SHORT bloqueado — BTC BULLISH (RSI=%.1f)", sym, _btc_rsi)
+            tg(f"[SENTINEL 🛡️] <b>{sym} SHORT bloqueado</b>\n"
+               f"BTC BULLISH — não operar contra a maré.")
+            return False
+        if btc_sentiment == "BEARISH" and side == "buy":
+            log.info("[SENTINEL 🛡️] %s LONG bloqueado — BTC BEARISH (RSI=%.1f)", sym, _btc_rsi)
+            tg(f"[SENTINEL 🛡️] <b>{sym} LONG bloqueado</b>\n"
+               f"BTC BEARISH — não operar contra a maré.")
+            return False
 
     # ONE DIRECTION ONLY — se EXISTE qualquer posição (mesmo lado oposto), aborta
     existing = okx_any_position_open(ALL_SYMS)
@@ -2106,6 +2195,35 @@ def telegram_commands_loop() -> None:
                         lines.append(f"{icon} — {label}")
                     lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>")
                     tg("\n".join(lines), chat_id)
+
+                # ── /sentinel — toggle BTC Sentinel ON/OFF ───────────────────
+                elif cmd == "sentinel":
+                    global _btc_sentinel_active
+                    _btc_sentinel_active = not _btc_sentinel_active
+                    estado = "ACTIVO ✅" if _btc_sentinel_active else "DESLIGADO ⚠️"
+                    tg(f"🛡️ <b>BTC Sentinel: {estado}</b>\n"
+                       f"{'Filtra entradas contra BTC — apenas a favor da maré.' if _btc_sentinel_active else 'Sentinel desligado — todas as entradas permitidas.'}", chat_id)
+                    log.info("BTC Sentinel: %s", estado)
+
+                # ── /btc — leitura rápida do Comandante BTC ──────────────────
+                elif cmd == "btc":
+                    try:
+                        sentiment, blocked, price, ema20, rsi = get_btc_sentiment()
+                        if price == 0.0:
+                            tg("⚠️ Erro ao consultar o Comandante BTC.\nAPI OKX não respondeu — tente novamente.", chat_id)
+                        else:
+                            tend_icon = "🟢 ALTA" if sentiment == "BULLISH" else "🔴 BAIXA"
+                            rsi_note  = " ⚠️ EXAUSTÃO" if blocked else ""
+                            tg(f"🧐 <b>Comandante BTC</b>\n"
+                               f"Preço: <b>${price:,.0f}</b> | EMA20: <b>${ema20:,.0f}</b>\n"
+                               f"Tendência: <b>{tend_icon}</b>\n"
+                               f"RSI: <b>{rsi:.1f}</b>{rsi_note}\n"
+                               f"Sentinel: {'🛡️ ACTIVO' if _btc_sentinel_active else '⚠️ OFF'}", chat_id)
+                        log.info("/btc consultado: %s price=%.0f ema20=%.0f rsi=%.1f",
+                                 sentiment, price, ema20, rsi)
+                    except Exception as e:
+                        log.warning("/btc erro: %s", e)
+                        tg("⚠️ Erro ao consultar o Comandante BTC.", chat_id)
 
                 # ── /subir6x — muda alavancagem para 6× ──────────────────────
                 elif cmd == "subir6x":
