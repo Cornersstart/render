@@ -147,6 +147,7 @@ VWAP_DIST_PCT    = 0.15  # distância mínima da VWAP após cross (em %)
 _duo_in_trade:       bool  = False
 _duo_cooldown_until: float = 0.0
 _lockdown_until:     float = 0.0   # bloqueio total de novos sinais (anti ping-pong)
+_last_fire_time:     float = 0.0   # última chamada a _fire() — cadeado de 60s anti-loop
 _duo_lock                  = threading.Lock()
 
 _bot_authorized: bool = True
@@ -1402,7 +1403,17 @@ def _fire(inst_id: str, side: str, signal_name: str,
       - STRICT pairs (ADA/XRP/DOGE): SL = STRICT_SL_PCT (1.5%)
       - Outros: usa sl_pct passado ou DUO_SL_PCT
     """
-    global _duo_in_trade, _lockdown_until, _btc_sentinel_active
+    global _duo_in_trade, _lockdown_until, _btc_sentinel_active, _last_fire_time
+
+    # 🔒 CADEADO DE LOOP — máx 1 tentativa de entrada por 60s (anti colapso)
+    now = time.time()
+    with _duo_lock:
+        if now - _last_fire_time < 60:
+            log.info("[_fire] Cadeado 60s activo (última tentativa há %.0fs) — ignorado",
+                     now - _last_fire_time)
+            return False
+        _last_fire_time = now
+
     # ── Routing automático do SL pela classificação do par ────────────────
     if sl_pct is None:
         if   inst_id in HOLD_PAIRS:   sl_pct = HOLD_SL_PCT
@@ -1472,7 +1483,9 @@ def _fire(inst_id: str, side: str, signal_name: str,
     bal       = okx_balance() or 0.0
     market_px = okx_ticker(inst_id)
     qty       = calc_qty(inst_id, market_px, bal)
-    log.info("⚙️ [%s] market order | bal=$%.2f mkt=%.5f qty=%d side=%s",
+
+    # 🔍 DEBUG DE MARGEM — visível no log do Render
+    log.info("💰 [%s] SALDO DISPONÍVEL: $%.4f USDT | mkt=%.5f qty=%d side=%s",
              sym, bal, market_px, qty, side)
 
     if bal <= 0:
@@ -1480,8 +1493,8 @@ def _fire(inst_id: str, side: str, signal_name: str,
         tg(f"❌ <b>{tag}</b> {sym}: saldo zero ou inválido — verifica credenciais OKX.")
         return False
     if qty < 1:
-        log.error("[%s] qty<1 (bal=%.2f mkt_px=%.5f) — saldo insuficiente", sym, bal, market_px)
-        tg(f"❌ <b>{tag}</b> {sym}: qty<1 (bal=${bal:.2f}) — saldo insuficiente para 1 contrato.")
+        log.error("[%s] qty<1 (bal=%.4f mkt_px=%.5f) — saldo insuficiente", sym, bal, market_px)
+        tg(f"❌ <b>{tag}</b> {sym}: qty<1 (bal=${bal:.4f}) — saldo insuficiente para 1 contrato.")
         return False
 
     # 🛡️ LOCKDOWN — só activa após passar TODOS os filtros (anti ping-pong real)
@@ -1493,8 +1506,16 @@ def _fire(inst_id: str, side: str, signal_name: str,
        f"RSI14: <b>{rsi14:.1f}</b> | RSI2: <b>{rsi2:.1f}</b>\n"
        f"Preço: <code>{market_px:.5f}</code> | {LEVERAGE}× ALL-IN")
 
-    okx_open_market(inst_id, side, qty)
-    log.info("📋 MARKET ORDER [%s] %s qty=%d px≈%.5f", tag, sym, qty, market_px)
+    try:
+        okx_open_market(inst_id, side, qty)
+        log.info("📋 MARKET ORDER [%s] %s qty=%d px≈%.5f", tag, sym, qty, market_px)
+    except Exception as ex:
+        err_msg = str(ex)
+        log.error("❌ ERRO OKX [%s] %s: %s", tag, sym, err_msg)
+        tg(f"❌ <b>ERRO OKX [{tag}]</b>\n<code>{err_msg}</code>")
+        with _duo_lock:
+            _lockdown_until = time.time()   # reset lockdown — falha não deve penalizar
+        return False
 
     # ── Aguardar preenchimento confirmado (máx 10s) ───────────────────────────
     avg   = market_px
