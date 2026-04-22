@@ -73,6 +73,8 @@ TRAIL_ACTIVATE_PCT  = 0.8    # trailing activa quando lucro ≥ +0.8%
 TRAIL_CALLBACK      = 0.01   # distância trailing = 1.0%
 LIMIT_OFFSET_PCT    = 0.15   # % de desconto no preço de entrada (ordem limit maker)
 LIMIT_FILL_TIMEOUT  = 180    # segundos máx para preencher a limit; senão cancela
+RSI2_LONG_MAX       = 40     # RSI(2) máximo para entrada LONG (pullback moderado)
+RSI2_SHORT_MIN      = 60     # RSI(2) mínimo para entrada SHORT (spike moderado)
 
 DUO_ETH    = "ETH-USDT-SWAP"
 DUO_SOL    = "SOL-USDT-SWAP"
@@ -1388,11 +1390,6 @@ def _fire(inst_id: str, side: str, signal_name: str,
     sym     = inst_id.replace("-USDT-SWAP", "")
     dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
 
-    # 🛡️ LOCKDOWN imediato — quer a ordem passe ou falhe, fica 15min em silêncio
-    # (anti ping-pong: evita 7 retries do mesmo sinal a cada 2 min)
-    with _duo_lock:
-        _lockdown_until = max(_lockdown_until, time.time() + LOCKDOWN_SECS)
-
     # ── BTC SENTINEL — filtro de maré (1H macro + RSI 15m) ──────────────────
     if _btc_sentinel_active:
         btc_sentiment, btc_blocked, _btc_px, _btc_ema, _btc_rsi = get_btc_sentiment()
@@ -1430,15 +1427,15 @@ def _fire(inst_id: str, side: str, signal_name: str,
         if rsi14 <= 50:
             log.info("[RSI DUAL] %s LONG bloqueado — rsi14=%.1f ≤ 50 (tendência fraca)", sym, rsi14)
             return False
-        if rsi2 >= 20:
-            log.info("[RSI DUAL] %s LONG aguardando susto — rsi2=%.1f ≥ 20 (sem pullback)", sym, rsi2)
+        if rsi2 >= RSI2_LONG_MAX:
+            log.info("[RSI DUAL] %s LONG aguardando pullback — rsi2=%.1f ≥ %d", sym, rsi2, RSI2_LONG_MAX)
             return False
     else:
         if rsi14 >= 50:
             log.info("[RSI DUAL] %s SHORT bloqueado — rsi14=%.1f ≥ 50 (tendência fraca)", sym, rsi14)
             return False
-        if rsi2 <= 80:
-            log.info("[RSI DUAL] %s SHORT aguardando pico — rsi2=%.1f ≤ 80 (sem spike)", sym, rsi2)
+        if rsi2 <= RSI2_SHORT_MIN:
+            log.info("[RSI DUAL] %s SHORT aguardando spike — rsi2=%.1f ≤ %d", sym, rsi2, RSI2_SHORT_MIN)
             return False
 
     # ONE DIRECTION ONLY — se EXISTE qualquer posição (mesmo lado oposto), aborta
@@ -1468,6 +1465,10 @@ def _fire(inst_id: str, side: str, signal_name: str,
         log.error("[%s] qty<1 (bal=%.2f limit_px=%.5f) — saldo insuficiente", sym, bal, limit_px)
         tg(f"❌ <b>{tag}</b> {sym}: qty<1 (bal=${bal:.2f}) — saldo insuficiente para 1 contrato.")
         return False
+
+    # 🛡️ LOCKDOWN — só activa após passar TODOS os filtros (anti ping-pong real)
+    with _duo_lock:
+        _lockdown_until = max(_lockdown_until, time.time() + LOCKDOWN_SECS)
 
     tg(f"⚔️ <b>{tag} — SNIPER LIMIT</b>\n"
        f"Sinal: <b>{signal_name}</b> | Par: <code>{sym}</code> | {dir_txt}\n"
