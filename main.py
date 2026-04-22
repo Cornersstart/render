@@ -73,8 +73,8 @@ TRAIL_ACTIVATE_PCT  = 0.8    # trailing activa quando lucro ≥ +0.8%
 TRAIL_CALLBACK      = 0.01   # distância trailing = 1.0%
 LIMIT_OFFSET_PCT    = 0.15   # % de desconto no preço de entrada (ordem limit maker)
 LIMIT_FILL_TIMEOUT  = 180    # segundos máx para preencher a limit; senão cancela
-RSI2_LONG_MAX       = 40     # RSI(2) máximo para entrada LONG (pullback moderado)
-RSI2_SHORT_MIN      = 60     # RSI(2) mínimo para entrada SHORT (spike moderado)
+RSI2_LONG_MAX       = 45     # RSI(2) máximo para entrada LONG (pullback moderado)
+RSI2_SHORT_MIN      = 55     # RSI(2) mínimo para entrada SHORT (spike moderado)
 
 DUO_ETH    = "ETH-USDT-SWAP"
 DUO_SOL    = "SOL-USDT-SWAP"
@@ -381,6 +381,28 @@ def okx_order(inst_id: str, side: str, qty: int) -> dict:
         raise RuntimeError(f"order {inst_id} side={side} qty={qty}: sCode={sCode} sMsg='{sMsg}' | top msg='{d.get('msg')}'")
     if d.get("code") != "0":
         raise RuntimeError(f"order {inst_id} side={side} qty={qty}: code={d.get('code')} msg='{d.get('msg')}' raw={d}")
+    return d
+
+# ── OKX — ordem market de entrada (execução imediata ao preço actual) ────────
+def okx_open_market(inst_id: str, side: str, qty: int) -> dict:
+    """Abre posição a mercado — execução imediata, sem espera de preenchimento."""
+    if not _has_creds(): raise RuntimeError("Sem credenciais OKX.")
+    path = "/api/v5/trade/order"
+    body = json.dumps({"instId": inst_id, "tdMode": "isolated", "side": side,
+                       "posSide": _SIDE_PS[side], "ordType": "market",
+                       "sz": str(qty)})
+    r = requests.post(f"https://www.okx.com{path}", headers=_headers("POST", path, body),
+                      data=body, timeout=10)
+    d    = r.json()
+    item = (d.get("data") or [{}])[0]
+    sCode = str(item.get("sCode", ""))
+    sMsg  = item.get("sMsg", "")
+    if sCode and sCode not in ("0",):
+        if sCode == "51000":
+            _LEVERAGE_SET.discard(inst_id)
+        raise RuntimeError(f"market_order {inst_id} side={side}: sCode={sCode} sMsg='{sMsg}'")
+    if d.get("code") != "0":
+        raise RuntimeError(f"market_order {inst_id}: code={d.get('code')} msg='{d.get('msg')}'")
     return d
 
 # ── OKX — ordem limit de entrada (maker, economiza taxas) ────────────────────
@@ -1446,23 +1468,19 @@ def _fire(inst_id: str, side: str, signal_name: str,
                  sym, ex_sym, ex_ps)
         return False
 
-    # ── Ordem LIMIT com desconto — maker, economiza taxas ────────────────────
-    bal      = okx_balance() or 0.0
+    # ── Ordem MARKET — execução imediata ao preço actual ─────────────────────
+    bal       = okx_balance() or 0.0
     market_px = okx_ticker(inst_id)
-    if side == "buy":
-        limit_px = market_px * (1 - LIMIT_OFFSET_PCT / 100)
-    else:
-        limit_px = market_px * (1 + LIMIT_OFFSET_PCT / 100)
-    qty = calc_qty(inst_id, limit_px, bal)
-    log.info("⚙️ [%s] limit order | bal=$%.2f mkt=%.5f limit=%.5f qty=%d side=%s",
-             sym, bal, market_px, limit_px, qty, side)
+    qty       = calc_qty(inst_id, market_px, bal)
+    log.info("⚙️ [%s] market order | bal=$%.2f mkt=%.5f qty=%d side=%s",
+             sym, bal, market_px, qty, side)
 
     if bal <= 0:
         log.error("[%s] saldo zero ou inválido — ordem abortada", sym)
         tg(f"❌ <b>{tag}</b> {sym}: saldo zero ou inválido — verifica credenciais OKX.")
         return False
     if qty < 1:
-        log.error("[%s] qty<1 (bal=%.2f limit_px=%.5f) — saldo insuficiente", sym, bal, limit_px)
+        log.error("[%s] qty<1 (bal=%.2f mkt_px=%.5f) — saldo insuficiente", sym, bal, market_px)
         tg(f"❌ <b>{tag}</b> {sym}: qty<1 (bal=${bal:.2f}) — saldo insuficiente para 1 contrato.")
         return False
 
@@ -1470,62 +1488,32 @@ def _fire(inst_id: str, side: str, signal_name: str,
     with _duo_lock:
         _lockdown_until = max(_lockdown_until, time.time() + LOCKDOWN_SECS)
 
-    tg(f"⚔️ <b>{tag} — SNIPER LIMIT</b>\n"
+    tg(f"⚔️ <b>{tag} — SNIPER MARKET</b>\n"
        f"Sinal: <b>{signal_name}</b> | Par: <code>{sym}</code> | {dir_txt}\n"
        f"RSI14: <b>{rsi14:.1f}</b> | RSI2: <b>{rsi2:.1f}</b>\n"
-       f"Limit: <code>{limit_px:.5f}</code> ({LIMIT_OFFSET_PCT:.2f}% desconto) | {LEVERAGE}× ALL-IN\n"
-       f"⏰ Max {LIMIT_FILL_TIMEOUT//60} min para preenchimento")
+       f"Preço: <code>{market_px:.5f}</code> | {LEVERAGE}× ALL-IN")
 
-    res    = okx_open_limit(inst_id, side, qty, limit_px)
-    ord_id = res["data"][0].get("ordId", "?")
-    log.info("📋 LIMIT ORDER [%s] %s ordId=%s qty=%d px=%.5f", tag, sym, ord_id, qty, limit_px)
+    okx_open_market(inst_id, side, qty)
+    log.info("📋 MARKET ORDER [%s] %s qty=%d px≈%.5f", tag, sym, qty, market_px)
 
-    # ── Poll para preenchimento (máx LIMIT_FILL_TIMEOUT segundos) ─────────────
-    deadline = time.time() + LIMIT_FILL_TIMEOUT
-    avg      = limit_px
-    filled   = False
-    while time.time() < deadline:
-        time.sleep(5)
-        order_data = okx_get_order_fill(inst_id, ord_id)
-        if not order_data:
-            continue
-        state = order_data.get("state", "")
-        if state == "filled":
-            avg    = float(order_data.get("avgPx", limit_px) or limit_px)
-            filled = True
-            log.info("✅ LIMIT FILLED %s avgPx=%.5f", sym, avg)
+    # ── Aguardar preenchimento confirmado (máx 10s) ───────────────────────────
+    avg   = market_px
+    for _ in range(10):
+        time.sleep(1)
+        pos = okx_position(inst_id)
+        if pos and float(pos.get("avgPx", 0)) > 0:
+            avg = float(pos["avgPx"])
+            log.info("✅ MARKET FILLED %s avgPx=%.5f", sym, avg)
             break
-        if state in ("canceled", "paused", "mmp_canceled"):
-            log.info("❌ Limit %s cancelada externamente (state=%s)", sym, state)
-            with _duo_lock:
-                _lockdown_until = time.time()   # reset lockdown — não penalizar
-            return False
 
-    if not filled:
-        # Timeout — cancelar ordem e desistir
-        try:
-            cpath = "/api/v5/trade/cancel-order"
-            cbody = json.dumps({"instId": inst_id, "ordId": ord_id})
-            requests.post(f"https://www.okx.com{cpath}",
-                          headers=_headers("POST", cpath, cbody), data=cbody, timeout=8)
-        except Exception as ce:
-            log.warning("cancel limit timeout %s: %s", sym, ce)
-        tg(f"⏰ <b>{tag} — Limit EXPIRADA (3 min)</b>\n"
-           f"Par: <code>{sym}</code> — preço fugiu sem nós.\n"
-           f"A aguardar o próximo sinal de qualidade.")
-        log.info("Limit %s expirada após %ds — cancelada", sym, LIMIT_FILL_TIMEOUT)
-        with _duo_lock:
-            _lockdown_until = time.time()   # reset lockdown
-        return False
-
-    # ── Ordem preenchida — configurar SL + Step Trail V5 ────────────────────
+    # ── Configurar SL + Step Trail V5 ────────────────────────────────────────
     sl_px       = avg * (1 - sl_pct / 100)            if side == "buy" else avg * (1 + sl_pct / 100)
     activate_px = avg * (1 + TRAIL_ACTIVATE_PCT / 100) if side == "buy" else avg * (1 - TRAIL_ACTIVATE_PCT / 100)
 
     okx_initial_sl(inst_id, ps, qty, sl_px)
     okx_trailing_stop(inst_id, ps, qty, activate_px)
 
-    tg(f"✅ <b>{tag} — ENTRADA CONFIRMADA (Maker)</b>\n"
+    tg(f"✅ <b>{tag} — ENTRADA CONFIRMADA (Market)</b>\n"
        f"Par: <code>{sym}</code> | {dir_txt}\n"
        f"Fill: <code>{avg:.5f}</code> | SL: <code>{sl_px:.5f}</code> (-{sl_pct}%)\n"
        f"📡 Trailing activa a <code>{activate_px:.5f}</code> (+{TRAIL_ACTIVATE_PCT}%)\n"
