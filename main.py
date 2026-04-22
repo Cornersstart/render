@@ -71,6 +71,8 @@ DUO_SL_PCT          = 1.2    # SL inicial (protecção antes do trailing activar
 DUO_COOLDOWN        = 1800   # 30 min cooldown após trade
 TRAIL_ACTIVATE_PCT  = 0.8    # trailing activa quando lucro ≥ +0.8%
 TRAIL_CALLBACK      = 0.01   # distância trailing = 1.0%
+LIMIT_OFFSET_PCT    = 0.15   # % de desconto no preço de entrada (ordem limit maker)
+LIMIT_FILL_TIMEOUT  = 180    # segundos máx para preencher a limit; senão cancela
 
 DUO_ETH    = "ETH-USDT-SWAP"
 DUO_SOL    = "SOL-USDT-SWAP"
@@ -379,6 +381,42 @@ def okx_order(inst_id: str, side: str, qty: int) -> dict:
         raise RuntimeError(f"order {inst_id} side={side} qty={qty}: code={d.get('code')} msg='{d.get('msg')}' raw={d}")
     return d
 
+# ── OKX — ordem limit de entrada (maker, economiza taxas) ────────────────────
+def okx_open_limit(inst_id: str, side: str, qty: int, limit_px: float) -> dict:
+    """Coloca ordem limit de abertura com preço fixo — modo maker (taxas reduzidas)."""
+    if not _has_creds(): raise RuntimeError("Sem credenciais OKX.")
+    path = "/api/v5/trade/order"
+    body = json.dumps({"instId": inst_id, "tdMode": "isolated", "side": side,
+                       "posSide": _SIDE_PS[side], "ordType": "limit",
+                       "sz": str(qty), "px": f"{limit_px:.6f}"})
+    r = requests.post(f"https://www.okx.com{path}", headers=_headers("POST", path, body),
+                      data=body, timeout=10)
+    d    = r.json()
+    item = (d.get("data") or [{}])[0]
+    sCode = str(item.get("sCode", ""))
+    sMsg  = item.get("sMsg", "")
+    if sCode and sCode not in ("0",):
+        if sCode == "51000":
+            _LEVERAGE_SET.discard(inst_id)
+        raise RuntimeError(f"limit_order {inst_id} side={side}: sCode={sCode} sMsg='{sMsg}'")
+    if d.get("code") != "0":
+        raise RuntimeError(f"limit_order {inst_id}: code={d.get('code')} msg='{d.get('msg')}'")
+    return d
+
+def okx_get_order_fill(inst_id: str, ord_id: str) -> dict | None:
+    """Retorna estado actual de uma ordem (state, avgPx, fillSz). None em caso de erro."""
+    if not _has_creds(): return None
+    path = f"/api/v5/trade/order?instId={inst_id}&ordId={ord_id}"
+    try:
+        r = requests.get(f"https://www.okx.com{path}",
+                         headers=_headers("GET", path), timeout=8)
+        d = r.json()
+        if d.get("code") == "0" and d.get("data"):
+            return d["data"][0]
+    except Exception as e:
+        log.warning("get_order_fill %s %s: %s", inst_id, ord_id, e)
+    return None
+
 # ── OKX — fecho de posição a mercado (Profit Lock) ────────────────────────────
 def okx_close_market(inst_id: str, pos_side: str, sz: int) -> dict:
     """Fecha uma posição existente a mercado (hedge mode OKX).
@@ -425,11 +463,31 @@ def okx_cancel_all_algos(inst_id: str, pos_side: str) -> None:
         log.error("cancel_all_algos %s: %s", inst_id, e)
 
 # ── OKX — limpeza total de ordens (regulares + algos, ambos os lados) ────────
+def _fetch_all_algos(inst_id: str) -> list[dict]:
+    """Agrega ordens algo pendentes de TODOS os tipos relevantes para inst_id.
+
+    OKX exige ordType no endpoint orders-algo-pending — sem ele devolve vazio.
+    Faz uma query por tipo e combina os resultados para garantir cobertura total.
+    """
+    ALGO_TYPES = ("conditional", "move_order_stop", "oco", "trigger")
+    all_orders: list[dict] = []
+    for ot in ALGO_TYPES:
+        try:
+            params = f"?instType=SWAP&instId={inst_id}&ordType={ot}"
+            r      = requests.get(f"https://www.okx.com/api/v5/trade/orders-algo-pending{params}",
+                                  headers=_headers("GET", f"/api/v5/trade/orders-algo-pending{params}"),
+                                  timeout=8)
+            data = r.json()
+            if data.get("code") == "0":
+                all_orders.extend(data.get("data", []))
+        except Exception as e:
+            log.warning("_fetch_all_algos %s ordType=%s: %s", inst_id, ot, e)
+    return all_orders
+
 def cancel_all_open_orders(inst_id: str) -> int:
     """Cancela TODAS as ordens abertas para inst_id (regulares + algos, long+short).
 
-    Chamada obrigatória após qualquer saída de posição (circuit breaker, step
-    trail, stop loss, profit lock) para garantir que não ficam ordens órfãs.
+    Varredura em dois passes para garantir que nada fica para trás.
     Retorna o número de ordens canceladas.
     """
     if not _has_creds(): return 0
@@ -452,25 +510,55 @@ def cancel_all_open_orders(inst_id: str) -> int:
     except Exception as e:
         log.warning("cancel_all_open_orders regular %s: %s", sym, e)
 
-    # 2) Algo orders (SL / TP / OCO / trigger / trailing) — todos os tipos, ambos os lados
-    try:
-        qpath  = "/api/v5/trade/orders-algo-pending"
-        params = f"?instType=SWAP&instId={inst_id}&ordType=conditional,oco,trigger,move_order_stop"
-        r      = requests.get(f"https://www.okx.com{qpath}{params}",
-                              headers=_headers("GET", f"{qpath}{params}"), timeout=8)
-        algos = r.json().get("data", [])
-        if algos:
+    # 2) Algo orders — query por tipo (OKX exige ordType explícito), duplo passe
+    for _pass in range(2):
+        try:
+            algos = _fetch_all_algos(inst_id)
+            if not algos:
+                break   # livro limpo
             to_cancel = [{"algoId": o["algoId"], "instId": inst_id} for o in algos]
             cpath = "/api/v5/trade/cancel-algos"
             cbody = json.dumps(to_cancel)
             requests.post(f"https://www.okx.com{cpath}",
                           headers=_headers("POST", cpath, cbody), data=cbody, timeout=8)
             cancelled += len(to_cancel)
-    except Exception as e:
-        log.warning("cancel_all_open_orders algos %s: %s", sym, e)
+            time.sleep(0.4)
+        except Exception as e:
+            log.warning("cancel_all_open_orders algos %s passe%d: %s", sym, _pass + 1, e)
+            break
 
     log.info("🧹 %s — Varredura completa: Ordens normais e ordens de gatilho (TP/SL) eliminadas. Total: %d",
              sym, cancelled)
+    return cancelled
+
+def clear_garbage(inst_id: str, pos_side: str) -> int:
+    """Remove TODAS as ordens algo (SL/TP/trailing) do pos_side antes de colocar nova.
+
+    Garante que não existe mais do que uma ordem de saída por contrato.
+    Duplo passe: cancela, espera propagação, confirma que ficou limpo.
+    Retorna total de ordens removidas.
+    """
+    if not _has_creds(): return 0
+    sym       = inst_id.replace("-USDT-SWAP", "")
+    cancelled = 0
+    for _pass in range(2):
+        try:
+            algos = [o for o in _fetch_all_algos(inst_id)
+                     if o.get("posSide") == pos_side]
+            if not algos:
+                break
+            to_cancel = [{"algoId": o["algoId"], "instId": inst_id} for o in algos]
+            cpath = "/api/v5/trade/cancel-algos"
+            cbody = json.dumps(to_cancel)
+            requests.post(f"https://www.okx.com{cpath}",
+                          headers=_headers("POST", cpath, cbody), data=cbody, timeout=8)
+            cancelled += len(to_cancel)
+            time.sleep(0.4)
+        except Exception as e:
+            log.warning("clear_garbage %s/%s passe%d: %s", sym, pos_side, _pass + 1, e)
+            break
+    if cancelled:
+        log.info("🗑️ clear_garbage %s/%s: %d ordens removidas", sym, pos_side, cancelled)
     return cancelled
 
 # ── OKX — SL inicial (protecção antes do trailing activar) ────────────────────
@@ -1097,8 +1185,8 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                         log.info("🔒 STEP TRAIL GRAU %d — $%.0f atingido → piso $%.0f | %s SL=%.5f",
                                  grau, trigger_usd, lock_usd, sym, lock_px)
                         try:
-                            cancel_all_open_orders(inst_id)
-                            time.sleep(1)
+                            clear_garbage(inst_id, pos_side)   # limpeza alvo antes de colocar novo SL
+                            time.sleep(0.5)
                             okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
                             okx_trailing_stop(inst_id, pos_side, pos_sz,
                                               mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy"
@@ -1129,6 +1217,8 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                 continue
 
             # 3 Nones consecutivos → posição confirmada fechada
+            # Aguarda 2s para OKX actualizar positions-history e balance real
+            time.sleep(2)
             # Tenta PnL real da OKX (fill price + fees); fallback: mark price
             exit_px, pnl_usd = _get_real_exit(inst_id)
             if exit_px > 0:
@@ -1174,48 +1264,118 @@ def _monitor(inst_id: str, pos_side: str, side: str,
 # EXECUÇÃO DE TRADE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def get_btc_sentiment() -> tuple[str, bool, float, float, float]:
-    """Retorna (sentiment, blocked, price, ema20, rsi).
+def get_rsi_dual(inst_id: str) -> tuple[float, float]:
+    """Retorna (rsi14, rsi2) no timeframe 15m do instrumento.
 
-    sentiment : "BULLISH" | "BEARISH" | "NEUTRO"
-    blocked   : True se RSI > 70 ou < 30 (zona de exaustão)
-    price/ema20/rsi : valores calculados (0.0 em caso de falha)
+    rsi14 — filtro de maré  : >50 = tendência LONG  | <50 = tendência SHORT
+    rsi2  — gatilho sniper  : <20 = entrada LONG ok | >80 = entrada SHORT ok
+    Em caso de falha retorna (50.0, 50.0) — neutro, não bloqueia nem dispara.
     """
     try:
         r = requests.get(
-            f"{OKX_BASE}/market/candles?instId=BTC-USDT-SWAP&bar=15m&limit=50",
+            f"{OKX_BASE}/market/candles?instId={inst_id}&bar=15m&limit=30",
             timeout=8
         )
         data = r.json()
         if data.get("code") != "0":
-            return ("NEUTRO", False, 0.0, 0.0, 0.0)
+            return (50.0, 50.0)
         df = pd.DataFrame(data["data"],
-             columns=["ts","open","high","low","close","vol",
-                      "volCcy","volCcyQuote","confirm"])
+             columns=["ts","open","high","low","close","vol","volCcy","volCcyQuote","confirm"])
         df["close"] = pd.to_numeric(df["close"])
         closes = df["close"].iloc[::-1].reset_index(drop=True)
-        ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-        price = closes.iloc[-1]
-        delta = closes.diff()
+
+        def _rsi(n: int) -> float:
+            delta = closes.diff()
+            gain  = delta.clip(lower=0).ewm(span=n, adjust=False).mean()
+            loss  = (-delta).clip(lower=0).ewm(span=n, adjust=False).mean()
+            return float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
+
+        return (_rsi(14), _rsi(2))
+    except Exception as e:
+        log.warning("get_rsi_dual %s: %s — neutro", inst_id, e)
+        return (50.0, 50.0)
+
+def get_btc_sentiment() -> tuple[str, bool, float, float, float]:
+    """Retorna (sentiment, blocked, price, ema20_1h, rsi15).
+
+    sentiment : "BULLISH" | "BULLISH_FRACO" | "NEUTRO" | "BEARISH_FRACO" | "BEARISH"
+    blocked   : True se RSI 15m > 72 ou < 28 (zona de exaustão)
+    price     : último close BTC 1H
+    ema20_1h  : EMA20 do 1H (sincronizada com Ichimoku POL 1H)
+    rsi15     : RSI14 do 15m
+    """
+    try:
+        # 15m para RSI de curto prazo
+        r15 = requests.get(
+            f"{OKX_BASE}/market/candles?instId=BTC-USDT-SWAP&bar=15m&limit=50",
+            timeout=8
+        )
+        # 1H para tendência macro (sincronizado com Ichimoku POL 1H)
+        r1h = requests.get(
+            f"{OKX_BASE}/market/candles?instId=BTC-USDT-SWAP&bar=1H&limit=50",
+            timeout=8
+        )
+        d15 = r15.json(); d1h = r1h.json()
+        if d15.get("code") != "0" or d1h.get("code") != "0":
+            return ("NEUTRO", False, 0.0, 0.0, 0.0)
+
+        # RSI14 do 15m
+        df15 = pd.DataFrame(d15["data"],
+               columns=["ts","open","high","low","close","vol",
+                        "volCcy","volCcyQuote","confirm"])
+        df15["close"] = pd.to_numeric(df15["close"])
+        c15   = df15["close"].iloc[::-1].reset_index(drop=True)
+        delta = c15.diff()
         gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
         loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
         rsi   = 100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10)))
-        blocked   = rsi > 70 or rsi < 30
-        sentiment = "BULLISH" if price > ema20 else "BEARISH"
-        log.info("🛡️ BTC SENTINEL: price=%.0f ema20=%.0f rsi=%.1f → %s %s",
-                 price, ema20, rsi, sentiment, "BLOQUEADO" if blocked else "OK")
-        return (sentiment, blocked, float(price), float(ema20), float(rsi))
+
+        # EMA20 e EMA50 do 1H (macro)
+        df1h = pd.DataFrame(d1h["data"],
+               columns=["ts","open","high","low","close","vol",
+                        "volCcy","volCcyQuote","confirm"])
+        df1h["close"] = pd.to_numeric(df1h["close"])
+        c1h      = df1h["close"].iloc[::-1].reset_index(drop=True)
+        ema20_1h = c1h.ewm(span=20, adjust=False).mean().iloc[-1]
+        ema50_1h = c1h.ewm(span=50, adjust=False).mean().iloc[-1]
+        price    = c1h.iloc[-1]
+
+        # Zona neutra: BTC dentro de 0.3% da EMA20 = indecisão
+        dist_ema = abs(price - ema20_1h) / ema20_1h * 100
+        if dist_ema < 0.3:
+            sentiment = "NEUTRO"
+        elif price > ema20_1h and ema20_1h > ema50_1h:
+            sentiment = "BULLISH"        # forte: EMA20 > EMA50
+        elif price > ema20_1h:
+            sentiment = "BULLISH_FRACO"
+        elif price < ema20_1h and ema20_1h < ema50_1h:
+            sentiment = "BEARISH"        # forte: EMA20 < EMA50
+        else:
+            sentiment = "BEARISH_FRACO"
+
+        blocked = rsi > 72 or rsi < 28
+        log.info("🛡️ BTC SENTINEL: price=%.0f ema20_1h=%.0f rsi15=%.1f → %s %s",
+                 price, ema20_1h, rsi, sentiment, "BLOQUEADO" if blocked else "OK")
+        return (sentiment, blocked, float(price), float(ema20_1h), float(rsi))
     except Exception as e:
         log.warning("BTC Sentinel erro: %s — permitindo entrada", e)
         return ("NEUTRO", False, 0.0, 0.0, 0.0)
 
 def _fire(inst_id: str, side: str, signal_name: str,
           tag: str = "DUO ELITE", sl_pct: float | None = None) -> bool:
-    """Executa ordem de mercado + SL inicial + Trailing Stop.
+    """Executa ordem limit (sniper entry) + SL inicial + Step Trail V5.
 
-    Golden Doctrine SL routing (sobrepõe sl_pct passado, excepto se for explícito):
-      - HOLD pairs (POL/ETH/SOL): SL = HOLD_SL_PCT (5%) → só circuit breaker
-      - STRICT pairs (ADA/XRP/DOGE): SL = STRICT_SL_PCT (1.5%) — não segurar
+    Filtros antes da ordem:
+      1. BTC Sentinel (maré macro 1H + RSI 15m)
+      2. RSI Dual: rsi14>50 e rsi2<20 para LONG; rsi14<50 e rsi2>80 para SHORT
+      3. ONE DIRECTION ONLY — aborta se já existe posição aberta
+
+    Limit order com desconto LIMIT_OFFSET_PCT (0.15%). Poll de fill até
+    LIMIT_FILL_TIMEOUT (180s); cancela e retorna False se não preencher.
+
+    SL routing (sobrepõe sl_pct passado, excepto se for explícito):
+      - HOLD pairs (POL/ETH/SOL): SL = HOLD_SL_PCT (5%) → circuit breaker
+      - STRICT pairs (ADA/XRP/DOGE): SL = STRICT_SL_PCT (1.5%)
       - Outros: usa sl_pct passado ou DUO_SL_PCT
     """
     global _duo_in_trade, _lockdown_until, _btc_sentinel_active
@@ -1233,7 +1393,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
     with _duo_lock:
         _lockdown_until = max(_lockdown_until, time.time() + LOCKDOWN_SECS)
 
-    # ── BTC SENTINEL — filtro de maré ────────────────────────────────────────
+    # ── BTC SENTINEL — filtro de maré (1H macro + RSI 15m) ──────────────────
     if _btc_sentinel_active:
         btc_sentiment, btc_blocked, _btc_px, _btc_ema, _btc_rsi = get_btc_sentiment()
         log.debug("[DEBUG] Sentinel consultado: BTC está %s (RSI=%.1f, bloqueado=%s)",
@@ -1241,19 +1401,44 @@ def _fire(inst_id: str, side: str, signal_name: str,
         if btc_blocked:
             log.info("[SENTINEL] BTC RSI extremo (%.1f) — %s bloqueado", _btc_rsi, sym)
             tg(f"[SENTINEL 🛡️] <b>{sym} bloqueado</b>\n"
-               f"BTC RSI {_btc_rsi:.1f} — zona de exaustão. Aguardando normalização.")
+               f"BTC RSI {_btc_rsi:.1f} — exaustão. Aguardando normalização.")
             with _duo_lock:
                 _lockdown_until = max(_lockdown_until, time.time() + 300)
             return False
-        if btc_sentiment == "BULLISH" and side == "sell":
-            log.info("[SENTINEL 🛡️] %s SHORT bloqueado — BTC BULLISH (RSI=%.1f)", sym, _btc_rsi)
+        # NEUTRO: indecisão — deixa passar mas regista
+        if btc_sentiment == "NEUTRO":
+            log.info("[SENTINEL] BTC em zona neutra — %s permitido com cautela", sym)
+        # BULLISH / BULLISH_FRACO: bloqueia SHORT
+        elif btc_sentiment in ("BULLISH", "BULLISH_FRACO") and side == "sell":
+            log.info("[SENTINEL 🛡️] %s SHORT bloqueado — BTC %s", sym, btc_sentiment)
             tg(f"[SENTINEL 🛡️] <b>{sym} SHORT bloqueado</b>\n"
-               f"BTC BULLISH — não operar contra a maré.")
+               f"BTC {btc_sentiment} (1H) — não vender contra a maré.")
             return False
-        if btc_sentiment == "BEARISH" and side == "buy":
-            log.info("[SENTINEL 🛡️] %s LONG bloqueado — BTC BEARISH (RSI=%.1f)", sym, _btc_rsi)
+        # BEARISH / BEARISH_FRACO: bloqueia LONG
+        elif btc_sentiment in ("BEARISH", "BEARISH_FRACO") and side == "buy":
+            log.info("[SENTINEL 🛡️] %s LONG bloqueado — BTC %s", sym, btc_sentiment)
             tg(f"[SENTINEL 🛡️] <b>{sym} LONG bloqueado</b>\n"
-               f"BTC BEARISH — não operar contra a maré.")
+               f"BTC {btc_sentiment} (1H) — não comprar contra a maré.")
+            return False
+
+    # ── RSI DUAL FILTER — Sniper Entry ──────────────────────────────────────
+    # rsi14 (filtro de maré): LONG exige >50 | SHORT exige <50
+    # rsi2  (gatilho):        LONG exige <20 | SHORT exige >80
+    rsi14, rsi2 = get_rsi_dual(inst_id)
+    log.info("🎯 RSI DUAL %s: rsi14=%.1f rsi2=%.1f side=%s", sym, rsi14, rsi2, side)
+    if side == "buy":
+        if rsi14 <= 50:
+            log.info("[RSI DUAL] %s LONG bloqueado — rsi14=%.1f ≤ 50 (tendência fraca)", sym, rsi14)
+            return False
+        if rsi2 >= 20:
+            log.info("[RSI DUAL] %s LONG aguardando susto — rsi2=%.1f ≥ 20 (sem pullback)", sym, rsi2)
+            return False
+    else:
+        if rsi14 >= 50:
+            log.info("[RSI DUAL] %s SHORT bloqueado — rsi14=%.1f ≥ 50 (tendência fraca)", sym, rsi14)
+            return False
+        if rsi2 <= 80:
+            log.info("[RSI DUAL] %s SHORT aguardando pico — rsi2=%.1f ≤ 80 (sem spike)", sym, rsi2)
             return False
 
     # ONE DIRECTION ONLY — se EXISTE qualquer posição (mesmo lado oposto), aborta
@@ -1264,42 +1449,86 @@ def _fire(inst_id: str, side: str, signal_name: str,
                  sym, ex_sym, ex_ps)
         return False
 
-    tg(f"⚔️ <b>{tag} — ATTACK</b>\n"
-       f"Sinal: <b>{signal_name}</b> | Par: <code>{sym}</code> | {dir_txt}\n"
-       f"SL <b>-{sl_pct}%</b> | Trailing activa <b>+{TRAIL_ACTIVATE_PCT}%</b> | Callback <b>{TRAIL_CALLBACK*100:.0f}%</b> | {LEVERAGE}× ALL-IN")
+    # ── Ordem LIMIT com desconto — maker, economiza taxas ────────────────────
+    bal      = okx_balance() or 0.0
+    market_px = okx_ticker(inst_id)
+    if side == "buy":
+        limit_px = market_px * (1 - LIMIT_OFFSET_PCT / 100)
+    else:
+        limit_px = market_px * (1 + LIMIT_OFFSET_PCT / 100)
+    qty = calc_qty(inst_id, limit_px, bal)
+    log.info("⚙️ [%s] limit order | bal=$%.2f mkt=%.5f limit=%.5f qty=%d side=%s",
+             sym, bal, market_px, limit_px, qty, side)
 
-    bal   = okx_balance() or 0.0
-    price = okx_ticker(inst_id)
-    qty   = calc_qty(inst_id, price, bal)
-    log.info("⚙️ [%s] preparando ordem | bal=$%.2f price=%.5f qty=%d posSide=%s",
-             sym, bal, price, qty, ps)
     if bal <= 0:
         log.error("[%s] saldo zero ou inválido — ordem abortada", sym)
         tg(f"❌ <b>{tag}</b> {sym}: saldo zero ou inválido — verifica credenciais OKX.")
         return False
     if qty < 1:
-        log.error("[%s] qty calculado < 1 (bal=%.2f price=%.5f) — ordem abortada", sym, bal, price)
+        log.error("[%s] qty<1 (bal=%.2f limit_px=%.5f) — saldo insuficiente", sym, bal, limit_px)
         tg(f"❌ <b>{tag}</b> {sym}: qty<1 (bal=${bal:.2f}) — saldo insuficiente para 1 contrato.")
         return False
-    res   = okx_order(inst_id, side, qty)
+
+    tg(f"⚔️ <b>{tag} — SNIPER LIMIT</b>\n"
+       f"Sinal: <b>{signal_name}</b> | Par: <code>{sym}</code> | {dir_txt}\n"
+       f"RSI14: <b>{rsi14:.1f}</b> | RSI2: <b>{rsi2:.1f}</b>\n"
+       f"Limit: <code>{limit_px:.5f}</code> ({LIMIT_OFFSET_PCT:.2f}% desconto) | {LEVERAGE}× ALL-IN\n"
+       f"⏰ Max {LIMIT_FILL_TIMEOUT//60} min para preenchimento")
+
+    res    = okx_open_limit(inst_id, side, qty, limit_px)
     ord_id = res["data"][0].get("ordId", "?")
-    log.info("✅ ORDER [%s] %s %s ordId=%s qty=%d", tag, sym, dir_txt, ord_id, qty)
+    log.info("📋 LIMIT ORDER [%s] %s ordId=%s qty=%d px=%.5f", tag, sym, ord_id, qty, limit_px)
 
-    time.sleep(2)
-    pos = okx_get_position(inst_id, ps)
-    avg = float(pos.get("avgPx", price) or price) if pos else price
+    # ── Poll para preenchimento (máx LIMIT_FILL_TIMEOUT segundos) ─────────────
+    deadline = time.time() + LIMIT_FILL_TIMEOUT
+    avg      = limit_px
+    filled   = False
+    while time.time() < deadline:
+        time.sleep(5)
+        order_data = okx_get_order_fill(inst_id, ord_id)
+        if not order_data:
+            continue
+        state = order_data.get("state", "")
+        if state == "filled":
+            avg    = float(order_data.get("avgPx", limit_px) or limit_px)
+            filled = True
+            log.info("✅ LIMIT FILLED %s avgPx=%.5f", sym, avg)
+            break
+        if state in ("canceled", "paused", "mmp_canceled"):
+            log.info("❌ Limit %s cancelada externamente (state=%s)", sym, state)
+            with _duo_lock:
+                _lockdown_until = time.time()   # reset lockdown — não penalizar
+            return False
 
+    if not filled:
+        # Timeout — cancelar ordem e desistir
+        try:
+            cpath = "/api/v5/trade/cancel-order"
+            cbody = json.dumps({"instId": inst_id, "ordId": ord_id})
+            requests.post(f"https://www.okx.com{cpath}",
+                          headers=_headers("POST", cpath, cbody), data=cbody, timeout=8)
+        except Exception as ce:
+            log.warning("cancel limit timeout %s: %s", sym, ce)
+        tg(f"⏰ <b>{tag} — Limit EXPIRADA (3 min)</b>\n"
+           f"Par: <code>{sym}</code> — preço fugiu sem nós.\n"
+           f"A aguardar o próximo sinal de qualidade.")
+        log.info("Limit %s expirada após %ds — cancelada", sym, LIMIT_FILL_TIMEOUT)
+        with _duo_lock:
+            _lockdown_until = time.time()   # reset lockdown
+        return False
+
+    # ── Ordem preenchida — configurar SL + Step Trail V5 ────────────────────
     sl_px       = avg * (1 - sl_pct / 100)            if side == "buy" else avg * (1 + sl_pct / 100)
     activate_px = avg * (1 + TRAIL_ACTIVATE_PCT / 100) if side == "buy" else avg * (1 - TRAIL_ACTIVATE_PCT / 100)
 
     okx_initial_sl(inst_id, ps, qty, sl_px)
     okx_trailing_stop(inst_id, ps, qty, activate_px)
 
-    tg(f"📡 <b>TRAILING READY</b> — [{tag}] {sym} {dir_txt}\n"
-       f"Entrada: <code>{avg:.5f}</code>\n"
-       f"🛡️ SL inicial: <code>{sl_px:.5f}</code> (-{sl_pct}%)\n"
-       f"📡 Trailing activa a: <code>{activate_px:.5f}</code> (+{TRAIL_ACTIVATE_PCT}%) | Callback: <b>{TRAIL_CALLBACK*100:.0f}%</b>\n"
-       f"ordId: <code>{ord_id}</code>")
+    tg(f"✅ <b>{tag} — ENTRADA CONFIRMADA (Maker)</b>\n"
+       f"Par: <code>{sym}</code> | {dir_txt}\n"
+       f"Fill: <code>{avg:.5f}</code> | SL: <code>{sl_px:.5f}</code> (-{sl_pct}%)\n"
+       f"📡 Trailing activa a <code>{activate_px:.5f}</code> (+{TRAIL_ACTIVATE_PCT}%)\n"
+       f"🔒 Step Trail V5 activo | Circuit Breaker -{CIRCUIT_BREAKER_PCT:.0f}%")
 
     with _duo_lock:
         _duo_in_trade = True
@@ -2196,14 +2425,24 @@ def telegram_commands_loop() -> None:
                     lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>")
                     tg("\n".join(lines), chat_id)
 
-                # ── /sentinel — toggle BTC Sentinel ON/OFF ───────────────────
+                # ── /sentinel [on|off] — toggle ou força estado BTC Sentinel ───
                 elif cmd == "sentinel":
                     global _btc_sentinel_active
-                    _btc_sentinel_active = not _btc_sentinel_active
-                    estado = "ACTIVO ✅" if _btc_sentinel_active else "DESLIGADO ⚠️"
-                    tg(f"🛡️ <b>BTC Sentinel: {estado}</b>\n"
-                       f"{'Filtra entradas contra BTC — apenas a favor da maré.' if _btc_sentinel_active else 'Sentinel desligado — todas as entradas permitidas.'}", chat_id)
-                    log.info("BTC Sentinel: %s", estado)
+                    if args and args[0] in ("on", "off", "ligar", "desligar"):
+                        _btc_sentinel_active = args[0] in ("on", "ligar")
+                    else:
+                        _btc_sentinel_active = not _btc_sentinel_active
+                    if _btc_sentinel_active:
+                        sentiment, blocked, px, ema, rsi = get_btc_sentiment()
+                        tg(f"🛡️ <b>BTC Sentinel ACTIVO ✅</b>\n"
+                           f"BTC agora: <b>{sentiment}</b>\n"
+                           f"Price: {px:,.0f} | EMA20 1H: {ema:,.0f} | RSI 15m: {rsi:.1f}\n"
+                           f"Filtra contra-tendência em todos os 7 pares.", chat_id)
+                    else:
+                        tg(f"🛡️ <b>BTC Sentinel DESLIGADO ⚠️</b>\n"
+                           f"Todas as entradas permitidas sem filtro BTC.\n"
+                           f"Para religar: <code>/sentinel on</code>", chat_id)
+                    log.info("BTC Sentinel: %s", "ACTIVO" if _btc_sentinel_active else "OFF")
 
                 # ── /btc — leitura rápida do Comandante BTC ──────────────────
                 elif cmd == "btc":
@@ -2212,12 +2451,19 @@ def telegram_commands_loop() -> None:
                         if price == 0.0:
                             tg("⚠️ Erro ao consultar o Comandante BTC.\nAPI OKX não respondeu — tente novamente.", chat_id)
                         else:
-                            tend_icon = "🟢 ALTA" if sentiment == "BULLISH" else "🔴 BAIXA"
+                            tend_map  = {
+                                "BULLISH":       "🟢 ALTA FORTE",
+                                "BULLISH_FRACO": "🟡 ALTA FRACA",
+                                "NEUTRO":        "⚪ NEUTRO",
+                                "BEARISH_FRACO": "🟠 BAIXA FRACA",
+                                "BEARISH":       "🔴 BAIXA FORTE",
+                            }
+                            tend_icon = tend_map.get(sentiment, sentiment)
                             rsi_note  = " ⚠️ EXAUSTÃO" if blocked else ""
                             tg(f"🧐 <b>Comandante BTC</b>\n"
-                               f"Preço: <b>${price:,.0f}</b> | EMA20: <b>${ema20:,.0f}</b>\n"
+                               f"Preço: <b>${price:,.0f}</b> | EMA20 1H: <b>${ema20:,.0f}</b>\n"
                                f"Tendência: <b>{tend_icon}</b>\n"
-                               f"RSI: <b>{rsi:.1f}</b>{rsi_note}\n"
+                               f"RSI 15m: <b>{rsi:.1f}</b>{rsi_note}\n"
                                f"Sentinel: {'🛡️ ACTIVO' if _btc_sentinel_active else '⚠️ OFF'}", chat_id)
                         log.info("/btc consultado: %s price=%.0f ema20=%.0f rsi=%.1f",
                                  sentiment, price, ema20, rsi)
