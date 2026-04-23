@@ -76,6 +76,11 @@ LIMIT_FILL_TIMEOUT  = 180    # segundos máx para preencher a limit; senão canc
 RSI2_LONG_MAX       = 45     # RSI(2) máximo para entrada LONG (pullback moderado)
 RSI2_SHORT_MIN      = 55     # RSI(2) mínimo para entrada SHORT (spike moderado)
 
+BB_PERIOD    = 20    # Bollinger Bands: período da SMA
+BB_STD       = 2.0   # desvios padrão da banda
+BB_TOL_PCT   = 0.5   # % de tolerância para "toque" na banda
+SCALP_SL_PCT = 1.0   # SL fixo para scalp de reversão Bollinger
+
 DUO_ETH    = "ETH-USDT-SWAP"
 DUO_SOL    = "SOL-USDT-SWAP"
 SHIELD_ADA = "ADA-USDT-SWAP"
@@ -940,6 +945,43 @@ def _ichimoku_cloud_dir(inst_id: str) -> str:
         log.warning("_ichimoku_cloud_dir %s: %s — neutro", inst_id, e)
         return "neutral"
 
+def _bollinger_check(inst_id: str, side: str) -> tuple[str, str, float]:
+    """Bollinger Esticada (15m) — verifica exaustão de preço antes de entrar.
+
+    Retorna (action, effective_side, rsi):
+      'allow'  — preço na banda correcta para o sinal → entra
+      'invert' — preço na banda oposta (armadilha) → inverte side e entra
+      'block'  — preço no corpo da Bollinger → não operar
+    Fail-safe: se API falhar, devolve ('allow', side, 0.0).
+    """
+    try:
+        df    = okx_candles(inst_id, bar="15m", limit=60)
+        close = df["close"]
+        mid   = close.rolling(BB_PERIOD).mean()
+        std   = close.rolling(BB_PERIOD).std()
+        upper = float((mid + BB_STD * std).iloc[-1])
+        lower = float((mid - BB_STD * std).iloc[-1])
+        price = float(close.iloc[-1])
+
+        delta = close.diff()
+        gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+        loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+        rsi   = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
+
+        at_upper = price >= upper * (1 - BB_TOL_PCT / 100) and rsi >= 65
+        at_lower = price <= lower * (1 + BB_TOL_PCT / 100) and rsi <= 35
+
+        if side == "buy":
+            if at_lower: return ("allow",  "buy",  rsi)
+            if at_upper: return ("invert", "sell", rsi)
+        else:
+            if at_upper: return ("allow",  "sell", rsi)
+            if at_lower: return ("invert", "buy",  rsi)
+        return ("block", side, rsi)
+    except Exception as e:
+        log.warning("_bollinger_check %s: %s — permitindo entrada", inst_id, e)
+        return ("allow", side, 0.0)
+
 def order_block_signal(df: pd.DataFrame) -> str | None:
     """ORDER BLOCK DEFENSE — ADA / XRP (1H candles).
 
@@ -1484,6 +1526,21 @@ def _fire(inst_id: str, side: str, signal_name: str,
             return False
         if cloud == "neutral":
             log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
+
+    # ── BOLLINGER ESTICADA — scalp de reversão à média ──────────────────────
+    if not force:
+        bb_action, side, bb_rsi = _bollinger_check(inst_id, side)
+        if bb_action == "block":
+            log.info("[BB] %s bloqueado — no corpo da Bollinger RSI=%.1f", sym, bb_rsi)
+            return False
+        if bb_action == "invert":
+            log.info("[BB TRAP 🪤] %s INVERTIDO → %s RSI=%.1f", sym, side, bb_rsi)
+            tg(f"[🪤 BB TRAP] <b>{sym} — ARMADILHA</b>\n"
+               f"Sinal invertido → {'LONG 🟢' if side == 'buy' else 'SHORT 🔴'}\n"
+               f"RSI: <b>{bb_rsi:.1f}</b> | SL: {SCALP_SL_PCT}% | Scalp de exaustão")
+        sl_pct  = SCALP_SL_PCT
+        ps      = _SIDE_PS[side]
+        dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
 
     # ONE DIRECTION ONLY — se EXISTE qualquer posição (mesmo lado oposto), aborta
     existing = okx_any_position_open(ALL_SYMS)
