@@ -1521,7 +1521,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
     avg   = market_px
     for _ in range(10):
         time.sleep(1)
-        pos = okx_position(inst_id)
+        pos = okx_get_position(inst_id, ps)
         if pos and float(pos.get("avgPx", 0)) > 0:
             avg = float(pos["avgPx"])
             log.info("✅ MARKET FILLED %s avgPx=%.5f", sym, avg)
