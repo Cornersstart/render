@@ -157,6 +157,7 @@ _duo_lock                  = threading.Lock()
 _bot_authorized: bool = True
 _auth_lock             = threading.Lock()
 _priority_mode: str    = ""   # "" = off | "ichimoku" = alinhamento com nuvem obrigatório
+_armadilha_mode: bool  = False  # False = off | True = Bollinger mean-reversion activo
 
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
@@ -1528,7 +1529,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
             log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
 
     # ── BOLLINGER ESTICADA — scalp de reversão à média ──────────────────────
-    if not force:
+    if not force and _armadilha_mode:
         bb_action, side, bb_rsi = _bollinger_check(inst_id, side)
         if bb_action == "block":
             log.info("[BB] %s bloqueado — no corpo da Bollinger RSI=%.1f", sym, bb_rsi)
@@ -2586,6 +2587,23 @@ def telegram_commands_loop() -> None:
                            "Todas as estratégias só entram alinhadas com a nuvem.\n"
                            "LONG: preço acima | SHORT: preço abaixo.\n"
                            "Usa <code>/pr ichimoku</code> para desligar.", chat_id)
+
+                elif cmd == "armadilha":
+                    global _armadilha_mode
+                    if _armadilha_mode:
+                        _armadilha_mode = False
+                        tg("🔓 <b>MODO ARMADILHA DESLIGADO</b>\n"
+                           "Bot volta ao modo normal — sem filtro Bollinger.", chat_id)
+                    else:
+                        _armadilha_mode = True
+                        tg("🪤 <b>MODO ARMADILHA ACTIVADO</b>\n"
+                           "─────────────────────────────\n"
+                           "Entradas apenas em extremos da Bollinger (15m):\n"
+                           "• <b>LONG</b>: preço ≤ banda inferior + RSI ≤ 35\n"
+                           "• <b>SHORT</b>: preço ≥ banda superior + RSI ≥ 65\n"
+                           "• <b>TRAP</b>: sinal invertido automaticamente\n"
+                           "• <b>SL fixo 1%</b> em todos os scalps\n"
+                           "Usa <code>/armadilha</code> para desligar.", chat_id)
 
                 elif cmd in ("status", "s"):
                     try: tg(_status_text(), chat_id)
