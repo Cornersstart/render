@@ -2486,14 +2486,14 @@ def telegram_commands_loop() -> None:
                         tg("⚠️ Erro ao consultar o Comandante BTC.", chat_id)
 
                 # ── /subir N — alavancagem 2×–10× ────────────────────────────
-                elif cmd in ("subir6x", "subir7x") or (cmd == "subir" and args):
-                    if cmd == "subir6x":   lev_str = "6"
-                    elif cmd == "subir7x": lev_str = "7"
-                    else:                  lev_str = args[0]
-                    if not lev_str.isdigit() or not 2 <= int(lev_str) <= 10:
-                        tg("❌ Uso: <code>/subir [2-10]</code>", chat_id)
+                # Aceita: /subir 8  |  /subir8  |  /subir8x  |  /subir6x  |  /subir7x
+                elif cmd == "subir" or cmd.startswith("subir"):
+                    # extrair dígito: "subir8x" → "8", "subir" + args "8" → "8"
+                    raw = cmd[5:].rstrip("x") if len(cmd) > 5 else (args[0] if args else "")
+                    if not raw.isdigit() or not 2 <= int(raw) <= 10:
+                        tg("❌ Uso: <code>/subir [2-10]</code>\nEx: <code>/subir 8</code>", chat_id)
                     else:
-                        lev = int(lev_str)
+                        lev = int(raw)
                         LEVERAGE = lev
                         _LEVERAGE_SET.clear()
                         for s in ALL_SYMS:
