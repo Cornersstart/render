@@ -1501,14 +1501,15 @@ def _fire(inst_id: str, side: str, signal_name: str,
     with _duo_lock:
         _lockdown_until = max(_lockdown_until, time.time() + LOCKDOWN_SECS)
 
-    tg(f"⚔️ <b>{tag} — SNIPER MARKET</b>\n"
-       f"Sinal: <b>{signal_name}</b> | Par: <code>{sym}</code> | {dir_txt}\n"
-       f"RSI14: <b>{rsi14:.1f}</b> | RSI2: <b>{rsi2:.1f}</b>\n"
-       f"Preço: <code>{market_px:.5f}</code> | {LEVERAGE}× ALL-IN")
-
     try:
-        okx_open_market(inst_id, side, qty)
-        log.info("📋 MARKET ORDER [%s] %s qty=%d px≈%.5f", tag, sym, qty, market_px)
+        res    = okx_open_market(inst_id, side, qty)
+        ord_id = (res.get("data") or [{}])[0].get("ordId", "?")
+        log.info("📋 MARKET ORDER [%s] %s ordId=%s qty=%d px≈%.5f",
+                 tag, sym, ord_id, qty, market_px)
+        tg(f"⚔️ <b>{tag} — SNIPER MARKET</b>\n"
+           f"Sinal: <b>{signal_name}</b> | Par: <code>{sym}</code> | {dir_txt}\n"
+           f"RSI14: <b>{rsi14:.1f}</b> | RSI2: <b>{rsi2:.1f}</b>\n"
+           f"Preço: <code>{market_px:.5f}</code> | ordId: <code>{ord_id}</code> | {LEVERAGE}× ALL-IN")
     except Exception as ex:
         err_msg = str(ex)
         log.error("❌ ERRO OKX [%s] %s: %s", tag, sym, err_msg)
