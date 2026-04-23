@@ -151,6 +151,7 @@ _duo_lock                  = threading.Lock()
 
 _bot_authorized: bool = True
 _auth_lock             = threading.Lock()
+_priority_mode: str    = ""   # "" = off | "ichimoku" = alinhamento com nuvem obrigatório
 
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
@@ -920,6 +921,25 @@ def ichimoku_signal(df: pd.DataFrame) -> str | None:
     if short_ok: return "sell"
     return None
 
+def _ichimoku_cloud_dir(inst_id: str) -> str:
+    """Retorna 'bull' (preço acima da nuvem), 'bear' (abaixo) ou 'neutral'."""
+    try:
+        df = okx_candles(inst_id, bar="1H", limit=120)
+        TENKAN, KIJUN, SSB_P = 9, 26, 52
+        hi = lambda n: df["high"].rolling(n).max()
+        lo = lambda n: df["low"].rolling(n).min()
+        span_a = ((hi(TENKAN) + lo(TENKAN)) / 2 + (hi(KIJUN) + lo(KIJUN)) / 2) / 2
+        span_b = (hi(SSB_P) + lo(SSB_P)) / 2
+        kumo_top = max(float(span_a.iloc[-27]), float(span_b.iloc[-27]))
+        kumo_bot = min(float(span_a.iloc[-27]), float(span_b.iloc[-27]))
+        price    = float(df["close"].iloc[-1])
+        if price > kumo_top: return "bull"
+        if price < kumo_bot: return "bear"
+        return "neutral"
+    except Exception as e:
+        log.warning("_ichimoku_cloud_dir %s: %s — neutro", inst_id, e)
+        return "neutral"
+
 def order_block_signal(df: pd.DataFrame) -> str | None:
     """ORDER BLOCK DEFENSE — ADA / XRP (1H candles).
 
@@ -1439,6 +1459,20 @@ def _fire(inst_id: str, side: str, signal_name: str,
                 return False
     else:
         log.info("⚡ [FORCE] %s — filtros IGNORADOS", sym)
+
+    # ── ICHIMOKU PRIORITY — alinhamento com nuvem ───────────────────────────
+    if not force and _priority_mode == "ichimoku":
+        cloud = _ichimoku_cloud_dir(inst_id)
+        if cloud == "bull" and side == "sell":
+            log.info("[ICHI PR] %s SHORT bloqueado — preço acima da nuvem", sym)
+            tg(f"[🥇 ICHI PR] <b>{sym} SHORT bloqueado</b>\nPreço acima da nuvem — alinhamento obrigatório.")
+            return False
+        if cloud == "bear" and side == "buy":
+            log.info("[ICHI PR] %s LONG bloqueado — preço abaixo da nuvem", sym)
+            tg(f"[🥇 ICHI PR] <b>{sym} LONG bloqueado</b>\nPreço abaixo da nuvem — alinhamento obrigatório.")
+            return False
+        if cloud == "neutral":
+            log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
 
     # ONE DIRECTION ONLY — se EXISTE qualquer posição (mesmo lado oposto), aborta
     existing = okx_any_position_open(ALL_SYMS)
@@ -2451,31 +2485,39 @@ def telegram_commands_loop() -> None:
                         log.warning("/btc erro: %s", e)
                         tg("⚠️ Erro ao consultar o Comandante BTC.", chat_id)
 
-                # ── /subir6x — muda alavancagem para 6× ──────────────────────
-                elif cmd == "subir6x":
-                    LEVERAGE = 6
-                    _LEVERAGE_SET.clear()   # força re-aplicação em todos os pares
-                    for sym in ALL_SYMS:
-                        try: okx_set_leverage(sym)
-                        except Exception as e: log.warning("lev6x %s: %s", sym, e)
-                    tg("⚙️ <b>Alavancagem → 6×</b>\n"
-                       "Aplicado em todos os pares.\n"
-                       "⚠️ Margem por trade aumenta — certifica-te que a banca suporta.\n"
-                       "Usa <code>/subir7x</code> para 7× ou <code>/start</code> para confirmar estado.", chat_id)
-                    log.info("Alavancagem alterada para 6x via Telegram")
+                # ── /subir N — alavancagem 2×–10× ────────────────────────────
+                elif cmd in ("subir6x", "subir7x") or (cmd == "subir" and args):
+                    if cmd == "subir6x":   lev_str = "6"
+                    elif cmd == "subir7x": lev_str = "7"
+                    else:                  lev_str = args[0]
+                    if not lev_str.isdigit() or not 2 <= int(lev_str) <= 10:
+                        tg("❌ Uso: <code>/subir [2-10]</code>", chat_id)
+                    else:
+                        lev = int(lev_str)
+                        LEVERAGE = lev
+                        _LEVERAGE_SET.clear()
+                        for s in ALL_SYMS:
+                            try: okx_set_leverage(s)
+                            except Exception as e: log.warning("subir%d %s: %s", lev, s, e)
+                        risk = "🟢 Baixo" if lev <= 5 else ("🟡 Médio" if lev <= 7 else "🔴 AGRESSIVO")
+                        warn = "\n⚠️ SL automático essencial neste nível!" if lev >= 8 else ""
+                        tg(f"🚀 <b>Alavancagem → {lev}×</b> {risk}\nAplicado em todos os pares.{warn}", chat_id)
+                        log.info("Alavancagem alterada para %dx via Telegram", lev)
 
-                # ── /subir7x — muda alavancagem para 7× ──────────────────────
-                elif cmd == "subir7x":
-                    LEVERAGE = 7
-                    _LEVERAGE_SET.clear()
-                    for sym in ALL_SYMS:
-                        try: okx_set_leverage(sym)
-                        except Exception as e: log.warning("lev7x %s: %s", sym, e)
-                    tg(f"⚙️ <b>Alavancagem → 7×</b>\n"
-                       "Aplicado em todos os pares.\n"
-                       f"⚠️ Risco de liquidação aumenta — circuit breaker -{CIRCUIT_BREAKER_PCT:.0f}% continua activo.\n"
-                       "Usa <code>/status</code> para confirmar estado.", chat_id)
-                    log.info("Alavancagem alterada para 7x via Telegram")
+                # ── /pr [modo] — toggle de modo de prioridade ─────────────────
+                elif cmd == "pr":
+                    global _priority_mode
+                    if not args or args[0] != "ichimoku":
+                        tg("❌ Uso: <code>/pr ichimoku</code>", chat_id)
+                    elif _priority_mode == "ichimoku":
+                        _priority_mode = ""
+                        tg("🔓 <b>Prioridade Ichimoku DESLIGADA</b>\nOrdens entram sem verificação de nuvem.", chat_id)
+                    else:
+                        _priority_mode = "ichimoku"
+                        tg("🥇 <b>MODO PRIORIDADE ICHIMOKU ACTIVADO</b>\n"
+                           "Todas as estratégias só entram alinhadas com a nuvem.\n"
+                           "LONG: preço acima | SHORT: preço abaixo.\n"
+                           "Usa <code>/pr ichimoku</code> para desligar.", chat_id)
 
                 elif cmd in ("status", "s"):
                     try: tg(_status_text(), chat_id)
