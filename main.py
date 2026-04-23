@@ -894,10 +894,8 @@ def ichimoku_signal(df: pd.DataFrame) -> str | None:
         and tk_bull_cross                                   # [F2] cross recente
         and (chikou_ref is None or price > chikou_ref)     # chikou livre
         and fut_kumo_bull                                   # [F1] kumo futuro verde
-        and price > kijun                                   # [F3] acima do kijun
-        and kijun_ok                                        # [F3] distância mínima
+        and price > kijun                                   # acima do kijun
         and 45 <= rsi <= 68                                 # [F4] RSI direccional
-        and kumo_thick_ok                                   # [F5] kumo sólido
     )
 
     # [F6] Filtro de tendência 3 dias — bloqueia SHORT se moeda subiu >2% nos últimos 3 dias
@@ -913,10 +911,8 @@ def ichimoku_signal(df: pd.DataFrame) -> str | None:
         and tk_bear_cross                                   # [F2] cross recente
         and (chikou_ref is None or price < chikou_ref)     # chikou livre
         and fut_kumo_bear                                   # [F1] kumo futuro vermelho
-        and price < kijun                                   # [F3] abaixo do kijun
-        and kijun_ok                                        # [F3] distância mínima
-        and 32 <= rsi <= 55                                 # [F4] RSI direccional
-        and kumo_thick_ok                                   # [F5] kumo sólido
+        and price < kijun                                   # abaixo do kijun
+        and 30 <= rsi <= 60                                 # [F4] RSI mais amplo para SHORT
         and trend_not_bullish                               # [F6] não vender em alta forte
     )
 
@@ -1414,6 +1410,8 @@ def _fire(inst_id: str, side: str, signal_name: str,
     sym     = inst_id.replace("-USDT-SWAP", "")
     dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
 
+    rsi14, rsi2 = 0.0, 0.0   # defaults (usados na mensagem Telegram)
+
     if not force:
         # ── BTC SENTINEL — filtro de maré (1H macro + RSI 15m) ──────────────
         if _btc_sentinel_active:
@@ -1439,27 +1437,8 @@ def _fire(inst_id: str, side: str, signal_name: str,
                 tg(f"[SENTINEL 🛡️] <b>{sym} LONG bloqueado</b>\n"
                    f"BTC {btc_sentiment} (1H) — não comprar contra a maré.")
                 return False
-
-        # ── RSI DUAL FILTER — Sniper Entry ──────────────────────────────────
-        rsi14, rsi2 = get_rsi_dual(inst_id)
-        log.info("🎯 RSI DUAL %s: rsi14=%.1f rsi2=%.1f side=%s", sym, rsi14, rsi2, side)
-        if side == "buy":
-            if rsi14 <= 50:
-                log.info("[RSI DUAL] %s LONG bloqueado — rsi14=%.1f ≤ 50", sym, rsi14)
-                return False
-            if rsi2 >= RSI2_LONG_MAX:
-                log.info("[RSI DUAL] %s LONG aguardando pullback — rsi2=%.1f ≥ %d", sym, rsi2, RSI2_LONG_MAX)
-                return False
-        else:
-            if rsi14 >= 50:
-                log.info("[RSI DUAL] %s SHORT bloqueado — rsi14=%.1f ≥ 50", sym, rsi14)
-                return False
-            if rsi2 <= RSI2_SHORT_MIN:
-                log.info("[RSI DUAL] %s SHORT aguardando spike — rsi2=%.1f ≤ %d", sym, rsi2, RSI2_SHORT_MIN)
-                return False
     else:
-        log.info("⚡ [FORCE] %s — filtros BTC Sentinel e RSI Dual IGNORADOS", sym)
-        rsi14, rsi2 = 0.0, 0.0
+        log.info("⚡ [FORCE] %s — filtros IGNORADOS", sym)
 
     # ONE DIRECTION ONLY — se EXISTE qualquer posição (mesmo lado oposto), aborta
     existing = okx_any_position_open(ALL_SYMS)
