@@ -147,7 +147,6 @@ VWAP_DIST_PCT    = 0.15  # distância mínima da VWAP após cross (em %)
 _duo_in_trade:       bool  = False
 _duo_cooldown_until: float = 0.0
 _lockdown_until:     float = 0.0   # bloqueio total de novos sinais (anti ping-pong)
-_last_fire_time:     float = 0.0   # última chamada a _fire() — cadeado de 60s anti-loop
 _duo_lock                  = threading.Lock()
 
 _bot_authorized: bool = True
@@ -1403,16 +1402,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
       - STRICT pairs (ADA/XRP/DOGE): SL = STRICT_SL_PCT (1.5%)
       - Outros: usa sl_pct passado ou DUO_SL_PCT
     """
-    global _duo_in_trade, _lockdown_until, _btc_sentinel_active, _last_fire_time
-
-    # 🔒 CADEADO DE LOOP — máx 1 tentativa de entrada por 60s (anti colapso)
-    now = time.time()
-    with _duo_lock:
-        if now - _last_fire_time < 60:
-            log.info("[_fire] Cadeado 60s activo (última tentativa há %.0fs) — ignorado",
-                     now - _last_fire_time)
-            return False
-        _last_fire_time = now
+    global _duo_in_trade, _lockdown_until, _btc_sentinel_active
 
     # ── Routing automático do SL pela classificação do par ────────────────
     if sl_pct is None:
