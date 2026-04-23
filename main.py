@@ -76,6 +76,11 @@ LIMIT_FILL_TIMEOUT  = 180    # segundos máx para preencher a limit; senão canc
 RSI2_LONG_MAX       = 45     # RSI(2) máximo para entrada LONG (pullback moderado)
 RSI2_SHORT_MIN      = 55     # RSI(2) mínimo para entrada SHORT (spike moderado)
 
+BB_PERIOD    = 20    # Bollinger Bands: período da SMA
+BB_STD       = 2.0   # desvios padrão da banda
+BB_TOL_PCT   = 0.5   # % de tolerância para "toque" na banda
+SCALP_SL_PCT = 1.0   # SL fixo para scalp de reversão Bollinger
+
 DUO_ETH    = "ETH-USDT-SWAP"
 DUO_SOL    = "SOL-USDT-SWAP"
 SHIELD_ADA = "ADA-USDT-SWAP"
@@ -139,7 +144,7 @@ FVG_GAP_EXPIRY = 40    # máximo de velas aguardando retorno (≈10h em 15m)
 FVG_BODY_MULT  = 1.0   # impulso: corpo da vela central ≥ 1× média20 (filtro de qualidade)
 
 # ── DISCIPLINA DE SNIPER ──────────────────────────────────────────────────────
-LOCKDOWN_SECS    = 900   # 15 min de silêncio total após qualquer tentativa de ordem
+LOCKDOWN_SECS    = 300   # 5 min — menos bloqueio entre sinais legítimos
 VWAP_BODY_MIN    = 0.55  # corpo/range mínimo para confirmar VWAP KISS (era 0.40)
 VWAP_DIST_PCT    = 0.15  # distância mínima da VWAP após cross (em %)
 
@@ -152,6 +157,7 @@ _duo_lock                  = threading.Lock()
 _bot_authorized: bool = True
 _auth_lock             = threading.Lock()
 _priority_mode: str    = ""   # "" = off | "ichimoku" = alinhamento com nuvem obrigatório
+_armadilha_mode: bool  = False  # False = off | True = Bollinger mean-reversion activo
 
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
@@ -940,6 +946,43 @@ def _ichimoku_cloud_dir(inst_id: str) -> str:
         log.warning("_ichimoku_cloud_dir %s: %s — neutro", inst_id, e)
         return "neutral"
 
+def _bollinger_check(inst_id: str, side: str) -> tuple[str, str, float]:
+    """Bollinger Esticada (15m) — verifica exaustão de preço antes de entrar.
+
+    Retorna (action, effective_side, rsi):
+      'allow'  — preço na banda correcta para o sinal → entra
+      'invert' — preço na banda oposta (armadilha) → inverte side e entra
+      'block'  — preço no corpo da Bollinger → não operar
+    Fail-safe: se API falhar, devolve ('allow', side, 0.0).
+    """
+    try:
+        df    = okx_candles(inst_id, bar="15m", limit=60)
+        close = df["close"]
+        mid   = close.rolling(BB_PERIOD).mean()
+        std   = close.rolling(BB_PERIOD).std()
+        upper = float((mid + BB_STD * std).iloc[-1])
+        lower = float((mid - BB_STD * std).iloc[-1])
+        price = float(close.iloc[-1])
+
+        delta = close.diff()
+        gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+        loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+        rsi   = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
+
+        at_upper = price >= upper * (1 - BB_TOL_PCT / 100) and rsi >= 65
+        at_lower = price <= lower * (1 + BB_TOL_PCT / 100) and rsi <= 35
+
+        if side == "buy":
+            if at_lower: return ("allow",  "buy",  rsi)
+            if at_upper: return ("invert", "sell", rsi)
+        else:
+            if at_upper: return ("allow",  "sell", rsi)
+            if at_lower: return ("invert", "buy",  rsi)
+        return ("block", side, rsi)
+    except Exception as e:
+        log.warning("_bollinger_check %s: %s — permitindo entrada", inst_id, e)
+        return ("allow", side, 0.0)
+
 def order_block_signal(df: pd.DataFrame) -> str | None:
     """ORDER BLOCK DEFENSE — ADA / XRP (1H candles).
 
@@ -1080,6 +1123,15 @@ def fvg_signal(df: pd.DataFrame, inst_id: str) -> str | None:
         return None
 
     rsi_ok = 35 <= cur["rsi"] <= 65
+
+    try:
+        df_4h = okx_candles(inst_id, bar="4H", limit=50)
+        ema20_4h = df_4h["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+        price_4h = float(df_4h["close"].iloc[-1])
+        trend_4h_bull = price_4h > ema20_4h
+    except Exception:
+        trend_4h_bull = None  # fail-safe: não bloqueia se API falhar
+
     signal_out = None
 
     active_gaps = [g for g in _fvg_gaps[inst_id]
@@ -1093,15 +1145,17 @@ def fvg_signal(df: pd.DataFrame, inst_id: str) -> str | None:
 
         if g["side"] == "buy" and cur["close"] > cur["ema200"]:
             if abs(cur["low"] - mid) <= tol or (cur["low"] <= mid <= cur["high"]):
-                g["filled"] = True
-                signal_out  = "buy"
-                break
+                if trend_4h_bull is None or trend_4h_bull:
+                    g["filled"] = True
+                    signal_out  = "buy"
+                    break
 
         if g["side"] == "sell" and cur["close"] < cur["ema200"]:
             if abs(cur["high"] - mid) <= tol or (cur["low"] <= mid <= cur["high"]):
-                g["filled"] = True
-                signal_out  = "sell"
-                break
+                if trend_4h_bull is None or not trend_4h_bull:
+                    g["filled"] = True
+                    signal_out  = "sell"
+                    break
 
     # ── Passo 3: limpar gaps expirados ou preenchidos ─────────────────────────
     _fvg_gaps[inst_id] = [
@@ -1473,6 +1527,21 @@ def _fire(inst_id: str, side: str, signal_name: str,
             return False
         if cloud == "neutral":
             log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
+
+    # ── BOLLINGER ESTICADA — scalp de reversão à média ──────────────────────
+    if not force and _armadilha_mode:
+        bb_action, side, bb_rsi = _bollinger_check(inst_id, side)
+        if bb_action == "block":
+            log.info("[BB] %s bloqueado — no corpo da Bollinger RSI=%.1f", sym, bb_rsi)
+            return False
+        if bb_action == "invert":
+            log.info("[BB TRAP 🪤] %s INVERTIDO → %s RSI=%.1f", sym, side, bb_rsi)
+            tg(f"[🪤 BB TRAP] <b>{sym} — ARMADILHA</b>\n"
+               f"Sinal invertido → {'LONG 🟢' if side == 'buy' else 'SHORT 🔴'}\n"
+               f"RSI: <b>{bb_rsi:.1f}</b> | SL: {SCALP_SL_PCT}% | Scalp de exaustão")
+        sl_pct  = SCALP_SL_PCT
+        ps      = _SIDE_PS[side]
+        dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
 
     # ONE DIRECTION ONLY — se EXISTE qualquer posição (mesmo lado oposto), aborta
     existing = okx_any_position_open(ALL_SYMS)
@@ -2518,6 +2587,23 @@ def telegram_commands_loop() -> None:
                            "Todas as estratégias só entram alinhadas com a nuvem.\n"
                            "LONG: preço acima | SHORT: preço abaixo.\n"
                            "Usa <code>/pr ichimoku</code> para desligar.", chat_id)
+
+                elif cmd == "armadilha":
+                    global _armadilha_mode
+                    if _armadilha_mode:
+                        _armadilha_mode = False
+                        tg("🔓 <b>MODO ARMADILHA DESLIGADO</b>\n"
+                           "Bot volta ao modo normal — sem filtro Bollinger.", chat_id)
+                    else:
+                        _armadilha_mode = True
+                        tg("🪤 <b>MODO ARMADILHA ACTIVADO</b>\n"
+                           "─────────────────────────────\n"
+                           "Entradas apenas em extremos da Bollinger (15m):\n"
+                           "• <b>LONG</b>: preço ≤ banda inferior + RSI ≤ 35\n"
+                           "• <b>SHORT</b>: preço ≥ banda superior + RSI ≥ 65\n"
+                           "• <b>TRAP</b>: sinal invertido automaticamente\n"
+                           "• <b>SL fixo 1%</b> em todos os scalps\n"
+                           "Usa <code>/armadilha</code> para desligar.", chat_id)
 
                 elif cmd in ("status", "s"):
                     try: tg(_status_text(), chat_id)
