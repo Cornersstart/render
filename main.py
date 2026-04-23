@@ -1528,8 +1528,9 @@ def _fire(inst_id: str, side: str, signal_name: str,
         if cloud == "neutral":
             log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
 
-    # ── BOLLINGER ESTICADA — scalp de reversão à média ──────────────────────
-    if not force and _armadilha_mode:
+    # ── BOLLINGER ESTICADA — só para FVG e VWAP (scalp de reversão) ─────────
+    _BB_STRATS = ("FVG", "VWAP")
+    if not force and _armadilha_mode and any(k in signal_name for k in _BB_STRATS):
         bb_action, side, bb_rsi = _bollinger_check(inst_id, side)
         if bb_action == "block":
             log.info("[BB] %s bloqueado — no corpo da Bollinger RSI=%.1f", sym, bb_rsi)
@@ -2598,11 +2599,13 @@ def telegram_commands_loop() -> None:
                         _armadilha_mode = True
                         tg("🪤 <b>MODO ARMADILHA ACTIVADO</b>\n"
                            "─────────────────────────────\n"
+                           "Aplica-se apenas a: <b>FVG</b> e <b>VWAP</b>\n"
+                           "(Ichimoku, OB, Supertrend — inalterados)\n\n"
                            "Entradas apenas em extremos da Bollinger (15m):\n"
                            "• <b>LONG</b>: preço ≤ banda inferior + RSI ≤ 35\n"
                            "• <b>SHORT</b>: preço ≥ banda superior + RSI ≥ 65\n"
                            "• <b>TRAP</b>: sinal invertido automaticamente\n"
-                           "• <b>SL fixo 1%</b> em todos os scalps\n"
+                           "• <b>SL fixo 1%</b> em todos os scalps BB\n"
                            "Usa <code>/armadilha</code> para desligar.", chat_id)
 
                 elif cmd in ("status", "s"):
