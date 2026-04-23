@@ -139,7 +139,7 @@ FVG_GAP_EXPIRY = 40    # máximo de velas aguardando retorno (≈10h em 15m)
 FVG_BODY_MULT  = 1.0   # impulso: corpo da vela central ≥ 1× média20 (filtro de qualidade)
 
 # ── DISCIPLINA DE SNIPER ──────────────────────────────────────────────────────
-LOCKDOWN_SECS    = 900   # 15 min de silêncio total após qualquer tentativa de ordem
+LOCKDOWN_SECS    = 300   # 5 min — menos bloqueio entre sinais legítimos
 VWAP_BODY_MIN    = 0.55  # corpo/range mínimo para confirmar VWAP KISS (era 0.40)
 VWAP_DIST_PCT    = 0.15  # distância mínima da VWAP após cross (em %)
 
@@ -1080,6 +1080,15 @@ def fvg_signal(df: pd.DataFrame, inst_id: str) -> str | None:
         return None
 
     rsi_ok = 35 <= cur["rsi"] <= 65
+
+    try:
+        df_4h = okx_candles(inst_id, bar="4H", limit=50)
+        ema20_4h = df_4h["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+        price_4h = float(df_4h["close"].iloc[-1])
+        trend_4h_bull = price_4h > ema20_4h
+    except Exception:
+        trend_4h_bull = None  # fail-safe: não bloqueia se API falhar
+
     signal_out = None
 
     active_gaps = [g for g in _fvg_gaps[inst_id]
@@ -1093,15 +1102,17 @@ def fvg_signal(df: pd.DataFrame, inst_id: str) -> str | None:
 
         if g["side"] == "buy" and cur["close"] > cur["ema200"]:
             if abs(cur["low"] - mid) <= tol or (cur["low"] <= mid <= cur["high"]):
-                g["filled"] = True
-                signal_out  = "buy"
-                break
+                if trend_4h_bull is None or trend_4h_bull:
+                    g["filled"] = True
+                    signal_out  = "buy"
+                    break
 
         if g["side"] == "sell" and cur["close"] < cur["ema200"]:
             if abs(cur["high"] - mid) <= tol or (cur["low"] <= mid <= cur["high"]):
-                g["filled"] = True
-                signal_out  = "sell"
-                break
+                if trend_4h_bull is None or not trend_4h_bull:
+                    g["filled"] = True
+                    signal_out  = "sell"
+                    break
 
     # ── Passo 3: limpar gaps expirados ou preenchidos ─────────────────────────
     _fvg_gaps[inst_id] = [
