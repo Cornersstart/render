@@ -1386,12 +1386,13 @@ def get_btc_sentiment() -> tuple[str, bool, float, float, float]:
         return ("NEUTRO", False, 0.0, 0.0, 0.0)
 
 def _fire(inst_id: str, side: str, signal_name: str,
-          tag: str = "DUO ELITE", sl_pct: float | None = None) -> bool:
-    """Executa ordem limit (sniper entry) + SL inicial + Step Trail V5.
+          tag: str = "DUO ELITE", sl_pct: float | None = None,
+          force: bool = False) -> bool:
+    """Executa ordem market + SL inicial + Step Trail V5.
 
-    Filtros antes da ordem:
+    Filtros antes da ordem (ignorados se force=True):
       1. BTC Sentinel (maré macro 1H + RSI 15m)
-      2. RSI Dual: rsi14>50 e rsi2<20 para LONG; rsi14<50 e rsi2>80 para SHORT
+      2. RSI Dual: rsi14>50 e rsi2<45 para LONG; rsi14<50 e rsi2>55 para SHORT
       3. ONE DIRECTION ONLY — aborta se já existe posição aberta
 
     Limit order com desconto LIMIT_OFFSET_PCT (0.15%). Poll de fill até
@@ -1413,53 +1414,52 @@ def _fire(inst_id: str, side: str, signal_name: str,
     sym     = inst_id.replace("-USDT-SWAP", "")
     dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
 
-    # ── BTC SENTINEL — filtro de maré (1H macro + RSI 15m) ──────────────────
-    if _btc_sentinel_active:
-        btc_sentiment, btc_blocked, _btc_px, _btc_ema, _btc_rsi = get_btc_sentiment()
-        log.debug("[DEBUG] Sentinel consultado: BTC está %s (RSI=%.1f, bloqueado=%s)",
-                  btc_sentiment, _btc_rsi, btc_blocked)
-        if btc_blocked:
-            log.info("[SENTINEL] BTC RSI extremo (%.1f) — %s bloqueado", _btc_rsi, sym)
-            tg(f"[SENTINEL 🛡️] <b>{sym} bloqueado</b>\n"
-               f"BTC RSI {_btc_rsi:.1f} — exaustão. Aguardando normalização.")
-            with _duo_lock:
-                _lockdown_until = max(_lockdown_until, time.time() + 300)
-            return False
-        # NEUTRO: indecisão — deixa passar mas regista
-        if btc_sentiment == "NEUTRO":
-            log.info("[SENTINEL] BTC em zona neutra — %s permitido com cautela", sym)
-        # BULLISH / BULLISH_FRACO: bloqueia SHORT
-        elif btc_sentiment in ("BULLISH", "BULLISH_FRACO") and side == "sell":
-            log.info("[SENTINEL 🛡️] %s SHORT bloqueado — BTC %s", sym, btc_sentiment)
-            tg(f"[SENTINEL 🛡️] <b>{sym} SHORT bloqueado</b>\n"
-               f"BTC {btc_sentiment} (1H) — não vender contra a maré.")
-            return False
-        # BEARISH / BEARISH_FRACO: bloqueia LONG
-        elif btc_sentiment in ("BEARISH", "BEARISH_FRACO") and side == "buy":
-            log.info("[SENTINEL 🛡️] %s LONG bloqueado — BTC %s", sym, btc_sentiment)
-            tg(f"[SENTINEL 🛡️] <b>{sym} LONG bloqueado</b>\n"
-               f"BTC {btc_sentiment} (1H) — não comprar contra a maré.")
-            return False
+    if not force:
+        # ── BTC SENTINEL — filtro de maré (1H macro + RSI 15m) ──────────────
+        if _btc_sentinel_active:
+            btc_sentiment, btc_blocked, _btc_px, _btc_ema, _btc_rsi = get_btc_sentiment()
+            log.debug("[DEBUG] Sentinel consultado: BTC está %s (RSI=%.1f, bloqueado=%s)",
+                      btc_sentiment, _btc_rsi, btc_blocked)
+            if btc_blocked:
+                log.info("[SENTINEL] BTC RSI extremo (%.1f) — %s bloqueado", _btc_rsi, sym)
+                tg(f"[SENTINEL 🛡️] <b>{sym} bloqueado</b>\n"
+                   f"BTC RSI {_btc_rsi:.1f} — exaustão. Aguardando normalização.")
+                with _duo_lock:
+                    _lockdown_until = max(_lockdown_until, time.time() + 300)
+                return False
+            if btc_sentiment == "NEUTRO":
+                log.info("[SENTINEL] BTC em zona neutra — %s permitido com cautela", sym)
+            elif btc_sentiment in ("BULLISH", "BULLISH_FRACO") and side == "sell":
+                log.info("[SENTINEL 🛡️] %s SHORT bloqueado — BTC %s", sym, btc_sentiment)
+                tg(f"[SENTINEL 🛡️] <b>{sym} SHORT bloqueado</b>\n"
+                   f"BTC {btc_sentiment} (1H) — não vender contra a maré.")
+                return False
+            elif btc_sentiment in ("BEARISH", "BEARISH_FRACO") and side == "buy":
+                log.info("[SENTINEL 🛡️] %s LONG bloqueado — BTC %s", sym, btc_sentiment)
+                tg(f"[SENTINEL 🛡️] <b>{sym} LONG bloqueado</b>\n"
+                   f"BTC {btc_sentiment} (1H) — não comprar contra a maré.")
+                return False
 
-    # ── RSI DUAL FILTER — Sniper Entry ──────────────────────────────────────
-    # rsi14 (filtro de maré): LONG exige >50 | SHORT exige <50
-    # rsi2  (gatilho):        LONG exige <20 | SHORT exige >80
-    rsi14, rsi2 = get_rsi_dual(inst_id)
-    log.info("🎯 RSI DUAL %s: rsi14=%.1f rsi2=%.1f side=%s", sym, rsi14, rsi2, side)
-    if side == "buy":
-        if rsi14 <= 50:
-            log.info("[RSI DUAL] %s LONG bloqueado — rsi14=%.1f ≤ 50 (tendência fraca)", sym, rsi14)
-            return False
-        if rsi2 >= RSI2_LONG_MAX:
-            log.info("[RSI DUAL] %s LONG aguardando pullback — rsi2=%.1f ≥ %d", sym, rsi2, RSI2_LONG_MAX)
-            return False
+        # ── RSI DUAL FILTER — Sniper Entry ──────────────────────────────────
+        rsi14, rsi2 = get_rsi_dual(inst_id)
+        log.info("🎯 RSI DUAL %s: rsi14=%.1f rsi2=%.1f side=%s", sym, rsi14, rsi2, side)
+        if side == "buy":
+            if rsi14 <= 50:
+                log.info("[RSI DUAL] %s LONG bloqueado — rsi14=%.1f ≤ 50", sym, rsi14)
+                return False
+            if rsi2 >= RSI2_LONG_MAX:
+                log.info("[RSI DUAL] %s LONG aguardando pullback — rsi2=%.1f ≥ %d", sym, rsi2, RSI2_LONG_MAX)
+                return False
+        else:
+            if rsi14 >= 50:
+                log.info("[RSI DUAL] %s SHORT bloqueado — rsi14=%.1f ≥ 50", sym, rsi14)
+                return False
+            if rsi2 <= RSI2_SHORT_MIN:
+                log.info("[RSI DUAL] %s SHORT aguardando spike — rsi2=%.1f ≤ %d", sym, rsi2, RSI2_SHORT_MIN)
+                return False
     else:
-        if rsi14 >= 50:
-            log.info("[RSI DUAL] %s SHORT bloqueado — rsi14=%.1f ≥ 50 (tendência fraca)", sym, rsi14)
-            return False
-        if rsi2 <= RSI2_SHORT_MIN:
-            log.info("[RSI DUAL] %s SHORT aguardando spike — rsi2=%.1f ≤ %d", sym, rsi2, RSI2_SHORT_MIN)
-            return False
+        log.info("⚡ [FORCE] %s — filtros BTC Sentinel e RSI Dual IGNORADOS", sym)
+        rsi14, rsi2 = 0.0, 0.0
 
     # ONE DIRECTION ONLY — se EXISTE qualquer posição (mesmo lado oposto), aborta
     existing = okx_any_position_open(ALL_SYMS)
@@ -1882,8 +1882,8 @@ def cmd_force(coin: str) -> str:
     dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
 
     tg(f"⚡ <b>/force {sym}</b> — RSI={rsi:.1f} → {dir_txt}\nA executar...")
-    # _fire() trata de tudo: ordem + SL + trailing + monitor
-    ok = _fire(inst_id, side, f"FORCE RSI={rsi:.0f}", tag="🎯 FORCE")
+    # force=True ignora BTC Sentinel e RSI Dual — ordem directa
+    ok = _fire(inst_id, side, f"FORCE RSI={rsi:.0f}", tag="🎯 FORCE", force=True)
     if ok:
         return (f"✅ <b>/force {sym} EXECUTADA</b>\n"
                 f"Direcção: {dir_txt}  |  RSI={rsi:.1f}\n"
