@@ -2595,7 +2595,7 @@ _GO_MAP = {
 }
 
 def telegram_commands_loop() -> None:
-    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE
+    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode
     if not TELEGRAM_TOKEN:
         log.warning("TELEGRAM_TOKEN não configurado — comandos desativados.")
         return
@@ -2859,7 +2859,6 @@ def telegram_commands_loop() -> None:
 
                 # ── /gv5 — força check Step Trail V5 e trava lucros ───────────
                 elif cmd == "gv5":
-                    global _trail_mode
                     if _trail_mode == "gv5":
                         tg("🔒 <b>Step Trail V5 já está ACTIVO</b>\n"
                            "5 graus de lock progressivo (break-even → G5).\n"
@@ -2873,7 +2872,6 @@ def telegram_commands_loop() -> None:
                            "Usa <code>/gv6</code> para mudar.", chat_id)
 
                 elif cmd == "gv6":
-                    global _trail_mode
                     if _trail_mode == "gv6":
                         tg("📡 <b>SAR M15 Trailing V6 já está ACTIVO</b>\n"
                            "Trailing dinâmico + fecho por inversão SAR M15.\n"
