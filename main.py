@@ -176,7 +176,8 @@ _btc_sentinel_active: bool = True
 
 # ── Estratégias habilitadas — /pausar /activar individuais ───────────────────
 _STRATEGY_KEYS = ("ichimoku", "supertrend", "rsidiv", "vwap", "engolfo", "ob", "fvg")
-_strategy_enabled: dict[str, bool] = {k: True for k in _STRATEGY_KEYS}
+# ICHIMOKU e FVG OFF por defeito — activar manualmente via /activar
+_strategy_enabled: dict[str, bool] = {k: (k not in ("ichimoku", "fvg")) for k in _STRATEGY_KEYS}
 _strategy_lock = threading.Lock()
 
 STATE_FILE = Path(__file__).parent / "bot_state.json"
@@ -185,11 +186,14 @@ STATE_FILE = Path(__file__).parent / "bot_state.json"
 def _save_state(authorized: bool) -> None:
     try:
         tmp = STATE_FILE.with_suffix(".tmp")
+        with _strategy_lock:
+            st_snap = dict(_strategy_enabled)
         tmp.write_text(json.dumps({
-            "authorized": authorized,
-            "tsar_mode":  _tsar_mode,
-            "trail_mode": _trail_mode,
-            "updatedAt":  datetime.now(timezone.utc).isoformat(),
+            "authorized":       authorized,
+            "tsar_mode":        _tsar_mode,
+            "trail_mode":       _trail_mode,
+            "strategy_enabled": st_snap,
+            "updatedAt":        datetime.now(timezone.utc).isoformat(),
         }, indent=2))
         tmp.replace(STATE_FILE)
     except Exception as e:
@@ -204,7 +208,7 @@ def _load_state() -> bool:
     return True
 
 def _load_full_state() -> None:
-    """Restaura authorized + tsar_mode + trail_mode do ficheiro de estado."""
+    """Restaura authorized + tsar_mode + trail_mode + strategy_enabled do ficheiro de estado."""
     global _tsar_mode, _trail_mode
     try:
         if STATE_FILE.exists():
@@ -213,8 +217,15 @@ def _load_full_state() -> None:
                 globals()["_bot_authorized"] = bool(data.get("authorized", True))
             _tsar_mode  = data.get("tsar_mode",  "")
             _trail_mode = data.get("trail_mode", "gv5")
-            log.info("Estado restaurado: auth=%s tsar=%r trail=%s",
-                     globals()["_bot_authorized"], _tsar_mode, _trail_mode)
+            saved_st = data.get("strategy_enabled", {})
+            if saved_st:
+                with _strategy_lock:
+                    for k in _STRATEGY_KEYS:
+                        if k in saved_st:
+                            _strategy_enabled[k] = bool(saved_st[k])
+            log.info("Estado restaurado: auth=%s tsar=%r trail=%s st=%s",
+                     globals()["_bot_authorized"], _tsar_mode, _trail_mode,
+                     {k: v for k, v in _strategy_enabled.items()})
     except Exception as e:
         log.warning("_load_full_state: %s", e)
 
@@ -2899,6 +2910,7 @@ def telegram_commands_loop() -> None:
                                 valid = " | ".join(_STRATEGY_KEYS)
                                 tg(f"❌ Estratégia <b>{key}</b> não reconhecida.\n"
                                    f"Opções: <code>{valid} | tudo</code>", chat_id)
+                        _save_state(_bot_authorized)
 
                 # ── /activar [estrategia|tudo] — reactiva estratégia ───────────
                 elif cmd == "activar":
@@ -2923,6 +2935,7 @@ def telegram_commands_loop() -> None:
                                 valid = " | ".join(_STRATEGY_KEYS)
                                 tg(f"❌ Estratégia <b>{key}</b> não reconhecida.\n"
                                    f"Opções: <code>{valid} | tudo</code>", chat_id)
+                        _save_state(_bot_authorized)
 
                 # ── /estrategias — lista estado ON/OFF de cada estratégia ───────
                 elif cmd == "estrategias":
@@ -3050,6 +3063,7 @@ def telegram_commands_loop() -> None:
                         tg("⚔️ Uso: <code>/tsar on | pause | off | status</code>", chat_id)
                     elif args[0] == "on":
                         _tsar_mode = "on"
+                        with _pending_lock: _pending_signals.clear()
                         _save_state(_bot_authorized)
                         tg("⚔️ <b>TSAR V11 ACTIVADO</b>\n"
                            "─────────────────────────────\n"
