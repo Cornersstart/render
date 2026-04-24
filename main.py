@@ -983,6 +983,66 @@ def _bollinger_check(inst_id: str, side: str) -> tuple[str, str, float]:
         log.warning("_bollinger_check %s: %s — permitindo entrada", inst_id, e)
         return ("allow", side, 0.0)
 
+def _m5_confirm(inst_id: str, side: str) -> tuple[str, str, str]:
+    """Confirmação M5: SAR Parabólico + RSI + Bollinger em 5 minutos.
+
+    Retorna (action, effective_side, debug_str):
+      'allow'  — confirmado, avança
+      'block'  — SAR/RSI/BB bloqueiam (sem Telegram, só log)
+      'invert' — exaustão oposta detectada (armadilha decide se inverte ou bloqueia)
+    Fail-safe: ('allow', side, 'API fail') — nunca bloqueia por erro de API.
+    """
+    try:
+        df    = okx_candles(inst_id, bar="5m", limit=100)
+        close = df["close"]
+
+        # SAR Parabólico via pandas_ta
+        psar  = df.ta.psar(af0=0.02, af=0.02, max_af=0.20)
+        col_l = next((c for c in psar.columns if "PSARl" in c), None)
+        col_s = next((c for c in psar.columns if "PSARs" in c), None)
+        sar_bull = (not pd.isna(psar[col_l].iloc[-1])) if col_l else True
+
+        # RSI 14 M5
+        delta = close.diff()
+        gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+        loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+        rsi   = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
+
+        # Bollinger (20,2) M5
+        mid      = close.rolling(BB_PERIOD).mean()
+        std      = close.rolling(BB_PERIOD).std()
+        upper    = float((mid + BB_STD * std).iloc[-1])
+        lower_bb = float((mid - BB_STD * std).iloc[-1])
+        price    = float(close.iloc[-1])
+
+        at_upper = price >= upper    * (1 - BB_TOL_PCT / 100)
+        at_lower = price <= lower_bb * (1 + BB_TOL_PCT / 100)
+
+        sar_str = "bull" if sar_bull else "bear"
+        dbg = f"SAR5={sar_str} RSI5={rsi:.1f}"
+
+        if side == "buy":
+            if rsi > 70 and at_upper:
+                return ("invert", "sell", f"{dbg} → RSI>70+banda sup → TRAP SHORT")
+            if rsi > 70:
+                return ("block", "buy", f"{dbg} → RSI5>70 bloqueio LONG")
+            if not sar_bull:
+                return ("block", "buy", f"{dbg} → SAR5 bearish, LONG bloqueado")
+        else:
+            if rsi < 30 and at_lower:
+                return ("invert", "buy", f"{dbg} → RSI<30+banda inf → TRAP LONG")
+            if rsi < 30:
+                return ("block", "sell", f"{dbg} → RSI5<30 bloqueio SHORT")
+            if at_lower:
+                return ("block", "sell", f"{dbg} → banda inferior BB5, não vender")
+            if sar_bull:
+                return ("block", "sell", f"{dbg} → SAR5 bullish, SHORT bloqueado")
+
+        return ("allow", side, dbg)
+    except Exception as e:
+        log.warning("_m5_confirm %s: %s — permitindo", inst_id, e)
+        return ("allow", side, "API fail")
+
 def order_block_signal(df: pd.DataFrame) -> str | None:
     """ORDER BLOCK DEFENSE — ADA / XRP (1H candles).
 
@@ -1528,18 +1588,22 @@ def _fire(inst_id: str, side: str, signal_name: str,
         if cloud == "neutral":
             log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
 
-    # ── BOLLINGER ESTICADA — scalp de reversão à média ──────────────────────
-    if not force and _armadilha_mode:
-        bb_action, side, bb_rsi = _bollinger_check(inst_id, side)
-        if bb_action == "block":
-            log.info("[BB] %s bloqueado — no corpo da Bollinger RSI=%.1f", sym, bb_rsi)
+    # ── M5 CONFIRM — SAR Parabólico + RSI + Bollinger 5m (sempre activo) ────
+    if not force:
+        m5_act, side, m5_dbg = _m5_confirm(inst_id, side)
+        if m5_act == "block":
+            log.info("[M5] %s bloqueado — %s", sym, m5_dbg)
             return False
-        if bb_action == "invert":
-            log.info("[BB TRAP 🪤] %s INVERTIDO → %s RSI=%.1f", sym, side, bb_rsi)
-            tg(f"[🪤 BB TRAP] <b>{sym} — ARMADILHA</b>\n"
-               f"Sinal invertido → {'LONG 🟢' if side == 'buy' else 'SHORT 🔴'}\n"
-               f"RSI: <b>{bb_rsi:.1f}</b> | SL: {SCALP_SL_PCT}% | Scalp de exaustão")
-        sl_pct  = SCALP_SL_PCT
+        if m5_act == "invert":
+            if _armadilha_mode:
+                log.info("[M5 TRAP 🪤] %s INVERTIDO → %s — %s", sym, side, m5_dbg)
+                tg(f"[🪤 M5 TRAP] <b>{sym} — ARMADILHA</b>\n"
+                   f"Sinal invertido → {'LONG 🟢' if side == 'buy' else 'SHORT 🔴'}\n"
+                   f"<code>{m5_dbg}</code> | SL: {SCALP_SL_PCT}%")
+                sl_pct = SCALP_SL_PCT
+            else:
+                log.info("[M5] %s inversion detectada — armadilha off, bloqueado", sym)
+                return False
         ps      = _SIDE_PS[side]
         dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
 
