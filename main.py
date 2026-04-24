@@ -100,7 +100,7 @@ OB_SL_PCT      = 1.0   # SL da estratégia OB (diferente do DUO)
 # ── STEP TRAILING V5 — 5 graus baseados em PnL não realizado (USDT) ───────────
 # Cada tuple: (trigger_usd, lock_usd) — ao atingir trigger, SL sobe para lock
 STEP_TRAIL_LEVELS: list[tuple[float, float]] = [
-    (25.0,  20.0),   # Grau 1: hit +$25  → piso +$20
+    (25.0,   0.0),   # Grau 1: hit +$25  → piso break-even (0x0)
     (40.0,  28.0),   # Grau 2: hit +$40  → piso +$28
     (60.0,  38.0),   # Grau 3: hit +$60  → piso +$38
     (80.0,  52.0),   # Grau 4: hit +$80  → piso +$52
@@ -117,7 +117,7 @@ STRICT_SL_PCT = 1.5
 # O controlo primário é o CIRCUIT_BREAKER no monitor (4.0%) — dispara primeiro.
 # Folga de 1pp evita corrida dupla CB-vs-exchange-SL no mesmo tick.
 HOLD_SL_PCT   = 5.0
-CIRCUIT_BREAKER_PCT = 4.0   # global — monitor fecha SEMPRE a -4% em preço (reduzido de 7%)
+CIRCUIT_BREAKER_PCT = 2.0   # global — monitor fecha SEMPRE a -2% em preço
 PROFIT_LOCK_USD     = 0.0   # 0 = desactivado — Step Trail V5 trata dos lucros
 
 # ── E06 SUPERTREND (SOL 15m) ──────────────────────────────────────────────────
@@ -983,14 +983,14 @@ def _bollinger_check(inst_id: str, side: str) -> tuple[str, str, float]:
         log.warning("_bollinger_check %s: %s — permitindo entrada", inst_id, e)
         return ("allow", side, 0.0)
 
-def _m5_confirm(inst_id: str, side: str) -> tuple[str, str, str]:
+def _m5_confirm(inst_id: str, side: str) -> tuple[str, str, str, float]:
     """Confirmação M5: SAR Parabólico + RSI + Bollinger em 5 minutos.
 
-    Retorna (action, effective_side, debug_str):
-      'allow'  — confirmado, avança
-      'block'  — SAR/RSI/BB bloqueiam (sem Telegram, só log)
-      'invert' — exaustão oposta detectada (armadilha decide se inverte ou bloqueia)
-    Fail-safe: ('allow', side, 'API fail') — nunca bloqueia por erro de API.
+    Retorna (action, effective_side, debug_str, sar_px):
+      'allow'  — confirmado, avança; sar_px = preço do SAR (usado como SL dinâmico)
+      'block'  — SAR/RSI/BB bloqueiam (sem Telegram, só log); sar_px = 0
+      'invert' — exaustão oposta detectada; sar_px = 0 (usa % SL)
+    Fail-safe: ('allow', side, 'API fail', 0.0).
     """
     try:
         df    = okx_candles(inst_id, bar="5m", limit=100)
@@ -1000,7 +1000,13 @@ def _m5_confirm(inst_id: str, side: str) -> tuple[str, str, str]:
         psar  = df.ta.psar(af0=0.02, af=0.02, max_af=0.20)
         col_l = next((c for c in psar.columns if "PSARl" in c), None)
         col_s = next((c for c in psar.columns if "PSARs" in c), None)
-        sar_bull = (not pd.isna(psar[col_l].iloc[-1])) if col_l else True
+        if col_l and col_s:
+            sar_bull = not pd.isna(psar[col_l].iloc[-1])
+            _lv      = psar[col_l].iloc[-1]
+            _sv      = psar[col_s].iloc[-1]
+            sar_px   = float(_lv if sar_bull else _sv)
+        else:
+            sar_bull, sar_px = True, 0.0
 
         # RSI 14 M5
         delta = close.diff()
@@ -1019,29 +1025,29 @@ def _m5_confirm(inst_id: str, side: str) -> tuple[str, str, str]:
         at_lower = price <= lower_bb * (1 + BB_TOL_PCT / 100)
 
         sar_str = "bull" if sar_bull else "bear"
-        dbg = f"SAR5={sar_str} RSI5={rsi:.1f}"
+        dbg = f"SAR5={sar_str}@{sar_px:.4f} RSI5={rsi:.1f}"
 
         if side == "buy":
             if rsi > 70 and at_upper:
-                return ("invert", "sell", f"{dbg} → RSI>70+banda sup → TRAP SHORT")
+                return ("invert", "sell", f"{dbg} → RSI>70+banda sup → TRAP SHORT", 0.0)
             if rsi > 70:
-                return ("block", "buy", f"{dbg} → RSI5>70 bloqueio LONG")
+                return ("block", "buy", f"{dbg} → RSI5>70 bloqueio LONG", 0.0)
             if not sar_bull:
-                return ("block", "buy", f"{dbg} → SAR5 bearish, LONG bloqueado")
+                return ("block", "buy", f"{dbg} → SAR5 bearish, LONG bloqueado", 0.0)
         else:
             if rsi < 30 and at_lower:
-                return ("invert", "buy", f"{dbg} → RSI<30+banda inf → TRAP LONG")
+                return ("invert", "buy", f"{dbg} → RSI<30+banda inf → TRAP LONG", 0.0)
             if rsi < 30:
-                return ("block", "sell", f"{dbg} → RSI5<30 bloqueio SHORT")
+                return ("block", "sell", f"{dbg} → RSI5<30 bloqueio SHORT", 0.0)
             if at_lower:
-                return ("block", "sell", f"{dbg} → banda inferior BB5, não vender")
+                return ("block", "sell", f"{dbg} → banda inferior BB5, não vender", 0.0)
             if sar_bull:
-                return ("block", "sell", f"{dbg} → SAR5 bullish, SHORT bloqueado")
+                return ("block", "sell", f"{dbg} → SAR5 bullish, SHORT bloqueado", 0.0)
 
-        return ("allow", side, dbg)
+        return ("allow", side, dbg, sar_px)
     except Exception as e:
         log.warning("_m5_confirm %s: %s — permitindo", inst_id, e)
-        return ("allow", side, "API fail")
+        return ("allow", side, "API fail", 0.0)
 
 def order_block_signal(df: pd.DataFrame) -> str | None:
     """ORDER BLOCK DEFENSE — ADA / XRP (1H candles).
@@ -1589,8 +1595,9 @@ def _fire(inst_id: str, side: str, signal_name: str,
             log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
 
     # ── M5 CONFIRM — SAR Parabólico + RSI + Bollinger 5m (sempre activo) ────
+    sar_px = 0.0  # fallback: usar % SL
     if not force:
-        m5_act, side, m5_dbg = _m5_confirm(inst_id, side)
+        m5_act, side, m5_dbg, sar_px = _m5_confirm(inst_id, side)
         if m5_act == "block":
             log.info("[M5] %s bloqueado — %s", sym, m5_dbg)
             return False
@@ -1601,6 +1608,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
                    f"Sinal invertido → {'LONG 🟢' if side == 'buy' else 'SHORT 🔴'}\n"
                    f"<code>{m5_dbg}</code> | SL: {SCALP_SL_PCT}%")
                 sl_pct = SCALP_SL_PCT
+                sar_px = 0.0  # armadilha usa % SL, não SAR
             else:
                 log.info("[M5] %s inversion detectada — armadilha off, bloqueado", sym)
                 return False
@@ -1665,7 +1673,11 @@ def _fire(inst_id: str, side: str, signal_name: str,
             break
 
     # ── Configurar SL + Step Trail V5 ────────────────────────────────────────
-    sl_px       = avg * (1 - sl_pct / 100)            if side == "buy" else avg * (1 + sl_pct / 100)
+    # SL dinâmico: usa preço do SAR M5 se estiver no lado correcto, senão usa %
+    if sar_px > 0 and ((side == "buy" and sar_px < avg) or (side == "sell" and sar_px > avg)):
+        sl_px = sar_px
+    else:
+        sl_px = avg * (1 - sl_pct / 100) if side == "buy" else avg * (1 + sl_pct / 100)
     activate_px = avg * (1 + TRAIL_ACTIVATE_PCT / 100) if side == "buy" else avg * (1 - TRAIL_ACTIVATE_PCT / 100)
 
     okx_initial_sl(inst_id, ps, qty, sl_px)
