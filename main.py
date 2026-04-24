@@ -2922,7 +2922,10 @@ def telegram_commands_loop() -> None:
                     for k, label in labels.items():
                         icon = "✅ ON " if snap[k] else "⛔ OFF"
                         lines.append(f"{icon} — {label}")
-                    lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>")
+                    tsar_icon = "✅ ON " if _tsar_mode == "on" else ("⏸ PAU" if _tsar_mode == "paused" else "⛔ OFF")
+                    lines.append(f"{tsar_icon} — ⚔️ BNB/SOL/ETH  TSAR V11 (Expulsão)")
+                    lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>\n"
+                                 "<i>/tsar on | pause | off | status</i>")
                     tg("\n".join(lines), chat_id)
 
                 # ── /sentinel [on|off] — toggle ou força estado BTC Sentinel ───
@@ -3191,7 +3194,8 @@ def telegram_commands_loop() -> None:
                        "/risco — Análise táctica (book + SL + veredito)\n"
                        "/backtest — Backtest real 100 dias OKX (~40s)\n\n"
                        "<b>Acção manual:</b>\n"
-                       "/gv5 — Força Step Trail V5 (trava lucros agora)\n"
+                       "/gv5 — Step Trail V5 | /gv6 — SAR M15 trailing\n"
+                       "/tsar on|pause|off|status — TSAR V11 Expulsão\n"
                        "/clab — 🧹 Cancela TODAS as ordens abertas na OKX\n"
                        "/go[coin] — Confirma sinal pendente (120s)\n"
                        "  /goeth  /gosol  /goxrp  /goada  /godoge  /gobnb\n"
@@ -3199,7 +3203,7 @@ def telegram_commands_loop() -> None:
                        "  Ex: <code>/force bnb</code>  (RSI 15m decide LONG/SHORT)\n\n"
                        "🥇 POL/SOL/XRP/ETH/BNB/ADA/DOGE — TODOS AUTOMÁTICOS\n\n"
                        f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD SL {HOLD_SL_PCT:.0f}%  |  STRICT SL {STRICT_SL_PCT:.1f}%\n"
-                       f"Step Trail V5  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 30min", chat_id)
+                       f"GV5/GV6  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 5min", chat_id)
 
         except Exception as e:
             log.warning("tg_polling: %s", e)
@@ -3230,20 +3234,21 @@ def _queue_signal(inst_id: str, sig: str, signal_name: str, tag: str,
 
 def duo_elite_loop() -> None:
     global _duo_in_trade, _duo_cooldown_until, _panic_until
-    log.info("🎯 V9 COMMANDER SUITE — FULL SQUAD + FVG EXPANSION READY — TODOS AUTOFIRE")
-    tg("🏆 <b>V9 FULL SQUAD — TODOS OS PARES AUTOMÁTICOS</b>\n\n"
+    log.info("🎯 V11 COMMANDER SUITE — FULL SQUAD + TSAR V11 READY — TODOS AUTOFIRE")
+    tg("🏆 <b>V11 FULL SQUAD — TODOS OS PARES AUTOMÁTICOS</b>\n\n"
        "🥇 <b>POL</b> — ICHIMOKU 1H (97.4% hit)\n"
        "🌊 <b>SOL</b> — SUPERTREND + FVG 15m\n"
        "🎯 <b>XRP</b> — RSI DIV + VWAP + OB 1H\n"
        "💧 <b>ETH</b> — VWAP KISS + FVG 15m\n"
        "🔷 <b>BNB</b> — FVG 15m (65.2% hit)\n"
        "🛡️ <b>ADA</b> — ORDER BLOCK 1H\n"
-       "🎲 <b>DOGE</b> — ORDER BLOCK 1H\n\n"
+       "🎲 <b>DOGE</b> — ORDER BLOCK 1H\n"
+       "⚔️ <b>BNB/SOL/ETH</b> — TSAR V11 (Expulsão BB)\n\n"
        "⚡ <b>TODOS entram automático</b> — sem /go[coin] obrigatório\n"
        "(O /go[coin] ainda existe para confirmar manualmente se quiseres)\n\n"
-       f"🔒 Step Trail V5  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD {HOLD_SL_PCT:.0f}%  |  STRICT {STRICT_SL_PCT:.1f}%  |  "
-       f"{LEVERAGE}× ALL-IN  |  cd 30min\n"
-       "✅ <b>10 ESTRATÉGIAS ATIVAS. SNIPER MODE ON.</b>")
+       f"🔒 GV5/GV6  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD {HOLD_SL_PCT:.0f}%  |  STRICT {STRICT_SL_PCT:.1f}%  |  "
+       f"{LEVERAGE}× ALL-IN  |  cd 5min\n"
+       "✅ <b>11 ESTRATÉGIAS ATIVAS. TSAR V11 PRONTO.</b>")
 
     while True:
         try:
