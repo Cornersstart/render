@@ -1049,6 +1049,85 @@ def _m5_confirm(inst_id: str, side: str) -> tuple[str, str, str, float]:
         log.warning("_m5_confirm %s: %s — permitindo", inst_id, e)
         return ("allow", side, "API fail", 0.0)
 
+def _triple_bb_touch(inst_id: str) -> tuple[str, str]:
+    """Triple Bollinger Confluence — toque simultâneo em M5, M15 e H1.
+
+    Retorna (touch_side, signal):
+      ('upper', 'sell') — exaustão de topo nos 3 TFs → SHORT
+      ('lower', 'buy')  — exaustão de fundo nos 3 TFs → LONG
+      ('none',  '')     — sem confluência tripla
+    """
+    try:
+        touches = []
+        for bar in ("5m", "15m", "1H"):
+            df    = okx_candles(inst_id, bar=bar, limit=60)
+            close = df["close"]
+            mid   = close.rolling(BB_PERIOD).mean()
+            std   = close.rolling(BB_PERIOD).std()
+            upper = float((mid + BB_STD * std).iloc[-1])
+            lower = float((mid - BB_STD * std).iloc[-1])
+            price = float(close.iloc[-1])
+            if   price >= upper * (1 - BB_TOL_PCT / 100): touches.append("upper")
+            elif price <= lower * (1 + BB_TOL_PCT / 100): touches.append("lower")
+            else: touches.append("none")
+        if all(t == "upper" for t in touches): return ("upper", "sell")
+        if all(t == "lower" for t in touches): return ("lower", "buy")
+        return ("none", "")
+    except Exception as e:
+        log.warning("_triple_bb_touch %s: %s", inst_id, e)
+        return ("none", "")
+
+def _sar_just_inverted(inst_id: str, to_direction: str) -> bool:
+    """True se SAR M5 inverteu nos últimos 2 candles na direcção esperada.
+    to_direction: 'bull' (SAR desceu) ou 'bear' (SAR subiu).
+    """
+    try:
+        df    = okx_candles(inst_id, bar="5m", limit=100)
+        psar  = df.ta.psar(af0=0.02, af=0.02, max_af=0.20)
+        col_l = next((c for c in psar.columns if "PSARl" in c), None)
+        if not col_l:
+            return False
+        for i in (-3, -2):
+            prev_bull = not pd.isna(psar[col_l].iloc[i])
+            curr_bull = not pd.isna(psar[col_l].iloc[i + 1])
+            if to_direction == "bull" and not prev_bull and curr_bull: return True
+            if to_direction == "bear" and prev_bull and not curr_bull: return True
+        return False
+    except Exception as e:
+        log.warning("_sar_just_inverted %s: %s", inst_id, e)
+        return False
+
+def _get_sar_m15_px(inst_id: str) -> float:
+    """Retorna preço actual do SAR Parabólico M15 para trailing stop."""
+    try:
+        df    = okx_candles(inst_id, bar="15m", limit=100)
+        psar  = df.ta.psar(af0=0.02, af=0.02, max_af=0.20)
+        col_l = next((c for c in psar.columns if "PSARl" in c), None)
+        col_s = next((c for c in psar.columns if "PSARs" in c), None)
+        if col_l and col_s:
+            sar_bull = not pd.isna(psar[col_l].iloc[-1])
+            return float(psar[col_l].iloc[-1] if sar_bull else psar[col_s].iloc[-1])
+        return 0.0
+    except Exception as e:
+        log.warning("_get_sar_m15_px %s: %s", inst_id, e)
+        return 0.0
+
+def _h1_band_opposite(inst_id: str, side: str) -> bool:
+    """True se preço atingiu a banda H1 oposta ao side (alvo de saída armadilha)."""
+    try:
+        df    = okx_candles(inst_id, bar="1H", limit=60)
+        close = df["close"]
+        mid   = close.rolling(BB_PERIOD).mean()
+        std   = close.rolling(BB_PERIOD).std()
+        upper = float((mid + BB_STD * std).iloc[-1])
+        lower = float((mid - BB_STD * std).iloc[-1])
+        price = float(close.iloc[-1])
+        if side == "sell": return price <= lower * (1 + BB_TOL_PCT / 100)
+        else:              return price >= upper * (1 - BB_TOL_PCT / 100)
+    except Exception as e:
+        log.warning("_h1_band_opposite %s: %s", inst_id, e)
+        return False
+
 def order_block_signal(df: pd.DataFrame) -> str | None:
     """ORDER BLOCK DEFENSE — ADA / XRP (1H candles).
 
@@ -1261,7 +1340,7 @@ def _get_real_exit(inst_id: str) -> tuple[float, float]:
 def _monitor(inst_id: str, pos_side: str, side: str,
              entry: float, sl_px: float, activate_px: float,
              sym: str, dir_txt: str, bal: float, qty: int,
-             tag: str = "DUO ELITE") -> None:
+             tag: str = "DUO ELITE", armadilha: bool = False) -> None:
     global _duo_in_trade, _duo_cooldown_until
     log.info("📡 SENTINELA [%s] %s %s | SL=%.5f | Trailing activa a %.5f | STEP TRAIL V5",
              tag, sym, dir_txt, sl_px, activate_px)
@@ -1322,50 +1401,93 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                             log.error("circuit breaker close fail %s: %s", sym, e)
                         continue
 
-            # ── STEP TRAILING V5 — 5 graus baseados em PnL não realizado ────────
+            # ── GESTÃO DE POSIÇÃO (armadilha SAR M15 ou Step Trail V5) ──────────
             if pos is not None:
                 upl     = float(pos.get("upl",    0) or 0)
                 mark_px = float(pos.get("markPx", 0) or 0)
                 avg_px  = float(pos.get("avgPx",  entry) or entry)
                 pos_sz  = int(float(pos.get("pos", qty) or qty))
 
-                if _step_trail_tier < len(STEP_TRAIL_LEVELS) and mark_px > 0 and avg_px > 0:
-                    trigger_usd, lock_usd = STEP_TRAIL_LEVELS[_step_trail_tier]
-                    if upl >= trigger_usd:
-                        # Calcula o preço de SL que garante 'lock_usd' USDT de lucro
-                        # Interpolação linear: lock_px = avg ± lock_usd*(markPx-avg)/upl
-                        if side == "buy":
-                            price_move = mark_px - avg_px
-                            lock_px    = avg_px + lock_usd * (price_move / upl)
+                if armadilha:
+                    # ── SAR M15 TRAILING — Armadilha V10 ─────────────────────
+                    sar15 = _get_sar_m15_px(inst_id)
+                    if sar15 > 0 and mark_px > 0:
+                        sar_inv = ((side == "buy"  and sar15 > mark_px) or
+                                   (side == "sell" and sar15 < mark_px))
+                        if sar_inv:
+                            log.info("🪤 SAR M15 inverteu %s — fechando", sym)
+                            try:
+                                cancel_all_open_orders(inst_id); time.sleep(0.5)
+                                okx_close_market(inst_id, pos_side, pos_sz)
+                                tg(f"🪤 <b>ARMADILHA — SAR M15 INVERTEU</b>\n"
+                                   f"Par: <code>{sym}</code> | {dir_txt}\n"
+                                   f"P&L: <b>${upl:+.2f}</b> USDT | SAR M15 cruzou o preço")
+                                with _duo_lock:
+                                    _duo_in_trade       = False
+                                    _duo_cooldown_until = time.time() + DUO_COOLDOWN
+                            except Exception as e:
+                                log.error("SAR M15 close: %s", e)
+                            return
                         else:
-                            price_move = avg_px - mark_px
-                            lock_px    = avg_px - lock_usd * (price_move / upl)
-
-                        grau = _step_trail_tier + 1
-                        log.info("🔒 STEP TRAIL GRAU %d — $%.0f atingido → piso $%.0f | %s SL=%.5f",
-                                 grau, trigger_usd, lock_usd, sym, lock_px)
+                            # Ratchet SL ao SAR M15 (só avança a favor)
+                            if ((side == "buy"  and sar15 > sl_px and sar15 < mark_px) or
+                                (side == "sell" and sar15 < sl_px and sar15 > mark_px)):
+                                try:
+                                    clear_garbage(inst_id, pos_side); time.sleep(0.5)
+                                    okx_initial_sl(inst_id, pos_side, pos_sz, sar15)
+                                    log.info("🪤 SAR M15 ratchet %s: SL %.5f→%.5f",
+                                             sym, sl_px, sar15)
+                                    sl_px = sar15
+                                except Exception as e:
+                                    log.warning("SAR M15 ratchet: %s", e)
+                    # Alvo: banda H1 oposta
+                    if mark_px > 0 and _h1_band_opposite(inst_id, side):
+                        log.info("🎯 %s banda H1 oposta — tomando lucro armadilha", sym)
                         try:
-                            clear_garbage(inst_id, pos_side)   # limpeza alvo antes de colocar novo SL
-                            time.sleep(0.5)
-                            okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
-                            okx_trailing_stop(inst_id, pos_side, pos_sz,
-                                              mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy"
-                                              else mark_px * (1 - TRAIL_ACTIVATE_PCT/100))
-                            _step_trail_tier += 1
-                            grau_bar = "🟢" * grau + "⚪" * (len(STEP_TRAIL_LEVELS) - grau)
-                            prox_txt = (
-                                f"Próximo grau: +${STEP_TRAIL_LEVELS[_step_trail_tier][0]:.0f} → piso +${STEP_TRAIL_LEVELS[_step_trail_tier][1]:.0f}"
-                                if _step_trail_tier < len(STEP_TRAIL_LEVELS) else "🏆 GRAU MÁXIMO ATINGIDO!"
-                            )
-                            dist_usd = upl - lock_usd
-                            tg(f"🔒 <b>STEP TRAIL GRAU {grau}/5</b> {grau_bar}\n"
+                            cancel_all_open_orders(inst_id); time.sleep(0.5)
+                            okx_close_market(inst_id, pos_side, pos_sz)
+                            tg(f"🎯 <b>ARMADILHA — ALVO H1 ATINGIDO</b>\n"
                                f"Par: <code>{sym}</code> | {dir_txt}\n"
-                               f"💰 Lucro actual: <b>${upl:+.2f}</b> → SL move para: <b>+${lock_usd:.0f}</b>\n"
-                               f"🛡️ Garantido: <b>${lock_usd:.0f} USDT</b> | Margem: ${dist_usd:.0f}\n"
-                               f"📍 SL price: <code>{lock_px:.5f}</code>\n"
-                               f"📡 {prox_txt}")
+                               f"P&L: <b>${upl:+.2f}</b> USDT 🏆 | Banda H1 oposta tocada")
+                            with _duo_lock:
+                                _duo_in_trade       = False
+                                _duo_cooldown_until = time.time() + DUO_COOLDOWN
                         except Exception as e:
-                            log.error("step trail grau %d: %s — voltando a tentar", grau, e)
+                            log.error("H1 alvo close: %s", e)
+                        return
+                else:
+                    # ── STEP TRAIL V5 (modo normal) ───────────────────────────
+                    if _step_trail_tier < len(STEP_TRAIL_LEVELS) and mark_px > 0 and avg_px > 0:
+                        trigger_usd, lock_usd = STEP_TRAIL_LEVELS[_step_trail_tier]
+                        if upl >= trigger_usd:
+                            if side == "buy":
+                                price_move = mark_px - avg_px
+                                lock_px    = avg_px + lock_usd * (price_move / upl)
+                            else:
+                                price_move = avg_px - mark_px
+                                lock_px    = avg_px - lock_usd * (price_move / upl)
+                            grau = _step_trail_tier + 1
+                            log.info("🔒 STEP TRAIL GRAU %d — $%.0f atingido | %s SL=%.5f",
+                                     grau, trigger_usd, sym, lock_px)
+                            try:
+                                clear_garbage(inst_id, pos_side); time.sleep(0.5)
+                                okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
+                                okx_trailing_stop(inst_id, pos_side, pos_sz,
+                                                  mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy"
+                                                  else mark_px * (1 - TRAIL_ACTIVATE_PCT/100))
+                                _step_trail_tier += 1
+                                grau_bar = "🟢" * grau + "⚪" * (len(STEP_TRAIL_LEVELS) - grau)
+                                prox_txt = (
+                                    f"Próximo grau: +${STEP_TRAIL_LEVELS[_step_trail_tier][0]:.0f} → piso +${STEP_TRAIL_LEVELS[_step_trail_tier][1]:.0f}"
+                                    if _step_trail_tier < len(STEP_TRAIL_LEVELS) else "🏆 GRAU MÁXIMO ATINGIDO!"
+                                )
+                                tg(f"🔒 <b>STEP TRAIL GRAU {grau}/5</b> {grau_bar}\n"
+                                   f"Par: <code>{sym}</code> | {dir_txt}\n"
+                                   f"💰 Lucro actual: <b>${upl:+.2f}</b> → SL: <b>+${lock_usd:.0f}</b>\n"
+                                   f"📍 SL price: <code>{lock_px:.5f}</code>\n"
+                                   f"📡 {prox_txt}")
+                            except Exception as e:
+                                log.error("step trail grau %d: %s", grau, e)
 
                 _none_streak = 0
                 continue
@@ -1594,23 +1716,40 @@ def _fire(inst_id: str, side: str, signal_name: str,
         if cloud == "neutral":
             log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
 
-    # ── M5 CONFIRM — SAR Parabólico + RSI + Bollinger 5m (sempre activo) ────
-    sar_px = 0.0  # fallback: usar % SL
+    # ── FILTRO M5 / ARMADILHA TRIPLE BB ─────────────────────────────────────
+    sar_px = 0.0
     if not force:
-        m5_act, side, m5_dbg, sar_px = _m5_confirm(inst_id, side)
-        if m5_act == "block":
-            log.info("[M5] %s bloqueado — %s", sym, m5_dbg)
-            return False
-        if m5_act == "invert":
-            if _armadilha_mode:
-                log.info("[M5 TRAP 🪤] %s INVERTIDO → %s — %s", sym, side, m5_dbg)
-                tg(f"[🪤 M5 TRAP] <b>{sym} — ARMADILHA</b>\n"
-                   f"Sinal invertido → {'LONG 🟢' if side == 'buy' else 'SHORT 🔴'}\n"
-                   f"<code>{m5_dbg}</code> | SL: {SCALP_SL_PCT}%")
-                sl_pct = SCALP_SL_PCT
-                sar_px = 0.0  # armadilha usa % SL, não SAR
+        if _armadilha_mode:
+            # ── TRIPLE BOLLINGER CONFLUENCE (M5 + M15 + H1) ──────────────────
+            tri_side, tri_signal = _triple_bb_touch(inst_id)
+            if tri_side == "none":
+                log.info("[TRIPLE BB] %s sem confluência tripla — bloqueado", sym)
+                return False
+            sar_dir = "bear" if tri_side == "upper" else "bull"
+            if not _sar_just_inverted(inst_id, sar_dir):
+                log.info("[TRIPLE BB] %s toque triplo OK — aguardando SAR M5 inverter", sym)
+                return False
+            if tri_signal != side:
+                log.info("[TRIPLE BB 🪤] %s INVERTIDO → %s (exaustão tripla)", sym, tri_signal)
+                tg(f"[🪤 TRIPLE BB] <b>{sym} — EXAUSTÃO TRIPLA</b>\n"
+                   f"{'LONG 🟢' if tri_signal == 'buy' else 'SHORT 🔴'} | "
+                   f"Banda {'superior' if tri_side == 'upper' else 'inferior'} M5+M15+H1\n"
+                   f"SAR M5 invertido | SL: {SCALP_SL_PCT}%")
             else:
-                log.info("[M5] %s inversion detectada — armadilha off, bloqueado", sym)
+                log.info("[TRIPLE BB ✅] %s exaustão tripla confirma sinal", sym)
+                tg(f"[✅ TRIPLE BB] <b>{sym}</b> — confluência tripla confirmada\n"
+                   f"{'LONG 🟢' if tri_signal == 'buy' else 'SHORT 🔴'} | SL SAR M5")
+            side   = tri_signal
+            sl_pct = SCALP_SL_PCT
+            _, _, _, sar_px = _m5_confirm(inst_id, side)
+        else:
+            # ── M5 CONFIRM normal (armadilha OFF) ────────────────────────────
+            m5_act, side, m5_dbg, sar_px = _m5_confirm(inst_id, side)
+            if m5_act == "block":
+                log.info("[M5] %s bloqueado — %s", sym, m5_dbg)
+                return False
+            if m5_act == "invert":
+                log.info("[M5] %s inversion sem armadilha — bloqueado", sym)
                 return False
         ps      = _SIDE_PS[side]
         dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
@@ -1694,7 +1833,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
 
     threading.Thread(target=_monitor,
         args=(inst_id, ps, side, avg, sl_px, activate_px, sym, dir_txt, bal, qty),
-        kwargs={"tag": tag},
+        kwargs={"tag": tag, "armadilha": _armadilha_mode},
         daemon=True, name=f"mon_{sym}").start()
     return True
 
@@ -2672,13 +2811,13 @@ def telegram_commands_loop() -> None:
                            "Bot volta ao modo normal — sem filtro Bollinger.", chat_id)
                     else:
                         _armadilha_mode = True
-                        tg("🪤 <b>MODO ARMADILHA ACTIVADO</b>\n"
+                        tg("🪤 <b>MODO ARMADILHA V10 ACTIVADO</b>\n"
                            "─────────────────────────────\n"
-                           "Entradas apenas em extremos da Bollinger (15m):\n"
-                           "• <b>LONG</b>: preço ≤ banda inferior + RSI ≤ 35\n"
-                           "• <b>SHORT</b>: preço ≥ banda superior + RSI ≥ 65\n"
-                           "• <b>TRAP</b>: sinal invertido automaticamente\n"
-                           "• <b>SL fixo 1%</b> em todos os scalps\n"
+                           "Triple BB M5+M15+H1 + SAR M5 inversão:\n"
+                           "• Banda superior → SHORT com SAR virado para baixo\n"
+                           "• Banda inferior → LONG com SAR virado para cima\n"
+                           "• <b>SL dinâmico</b>: SAR M5 price\n"
+                           "• <b>Saída</b>: SAR M15 inversão ou banda H1 oposta\n"
                            "Usa <code>/armadilha</code> para desligar.", chat_id)
 
                 elif cmd in ("status", "s"):
