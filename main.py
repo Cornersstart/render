@@ -68,7 +68,7 @@ RISK_FRAC = 1.0    # ALL-IN
 
 # ── DUO DE ELITE ───────────────────────────────────────────────────────────────
 DUO_SL_PCT          = 1.2    # SL inicial (protecção antes do trailing activar)
-DUO_COOLDOWN        = 1800   # 30 min cooldown após trade
+DUO_COOLDOWN        = 300    # 5 min cooldown após trade (era 30 min)
 TRAIL_ACTIVATE_PCT  = 0.8    # trailing activa quando lucro ≥ +0.8%
 TRAIL_CALLBACK      = 0.01   # distância trailing = 1.0%
 LIMIT_OFFSET_PCT    = 0.15   # % de desconto no preço de entrada (ordem limit maker)
