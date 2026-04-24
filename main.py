@@ -161,7 +161,7 @@ _auth_lock             = threading.Lock()
 _priority_mode: str    = ""      # "" = off | "ichimoku" = alinhamento com nuvem obrigatório
 _armadilha_mode: bool  = False   # False = off | True = Bollinger mean-reversion activo
 _trail_mode: str       = "gv5"   # "gv5" = Step Trail V5 | "gv6" = SAR M15 trailing
-_tsar_mode: str        = ""      # "" = off | "on" = activo | "paused" = sem novas entradas
+_tsar_mode: str        = "on"    # "on" = activo por defeito | "" = off | "paused" = sem novas entradas
 
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
