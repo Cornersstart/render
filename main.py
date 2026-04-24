@@ -156,8 +156,9 @@ _duo_lock                  = threading.Lock()
 
 _bot_authorized: bool = True
 _auth_lock             = threading.Lock()
-_priority_mode: str    = ""   # "" = off | "ichimoku" = alinhamento com nuvem obrigatório
-_armadilha_mode: bool  = False  # False = off | True = Bollinger mean-reversion activo
+_priority_mode: str    = ""      # "" = off | "ichimoku" = alinhamento com nuvem obrigatório
+_armadilha_mode: bool  = False   # False = off | True = Bollinger mean-reversion activo
+_trail_mode: str       = "gv5"   # "gv5" = Step Trail V5 | "gv6" = SAR M15 trailing
 
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
@@ -1833,7 +1834,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
 
     threading.Thread(target=_monitor,
         args=(inst_id, ps, side, avg, sl_px, activate_px, sym, dir_txt, bal, qty),
-        kwargs={"tag": tag, "armadilha": _armadilha_mode},
+        kwargs={"tag": tag, "armadilha": (_armadilha_mode or _trail_mode == "gv6")},
         daemon=True, name=f"mon_{sym}").start()
     return True
 
@@ -2556,16 +2557,21 @@ def _status_text() -> str:
         eq, avail = full
         bal_str = f"<b>${eq:,.2f}</b> total | <b>${avail:,.2f}</b> livre"
 
+    trail_txt = ("🔒 GV5 Step Trail" if _trail_mode == "gv5" else "📡 GV6 SAR M15")
+    arm_txt   = "🪤 ARMADILHA ON" if _armadilha_mode else ""
+    modes_txt = " | ".join(filter(None, [trail_txt, arm_txt]))
     return (f"📊 <b>COMMANDER V9 — {datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}</b>\n"
             f"💰 {bal_str}\n"
             f"Status: {status}\n"
-            f"⚙️ Alavancagem: <b>{LEVERAGE}×</b>  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  SL HOLD {HOLD_SL_PCT:.0f}%  |  cd 30min\n"
+            f"⚙️ Alavancagem: <b>{LEVERAGE}×</b>  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%\n"
+            f"🎛️ Modo: {modes_txt}\n"
             f"🔥 TODOS os 7 pares entram AUTOMÁTICO\n"
             f"POL · SOL · ETH · XRP · BNB · ADA · DOGE\n\n"
             f"<b>COMANDOS:</b>\n"
             f"/tp /radar /lpd /meta /status /panic\n"
-            f"/go[coin] /gv5 /force [coin] /risco\n"
-            f"/subir6x /subir7x  |  /pause → só /start desbloqueia")
+            f"/go[coin] /gv5 /gv6 /force [coin] /risco\n"
+            f"/subir [2-10]  |  /armadilha  |  /pr ichimoku\n"
+            f"/pause → só /start desbloqueia")
 
 def report_loop() -> None:
     last = time.time()
@@ -2853,8 +2859,33 @@ def telegram_commands_loop() -> None:
 
                 # ── /gv5 — força check Step Trail V5 e trava lucros ───────────
                 elif cmd == "gv5":
-                    try: tg(cmd_gv5(), chat_id)
-                    except Exception as e: tg(f"Erro /gv5: {e}", chat_id)
+                    global _trail_mode
+                    if _trail_mode == "gv5":
+                        tg("🔒 <b>Step Trail V5 já está ACTIVO</b>\n"
+                           "5 graus de lock progressivo (break-even → G5).\n"
+                           "Usa <code>/gv6</code> para mudar para SAR M15.", chat_id)
+                    else:
+                        _trail_mode = "gv5"
+                        tg("🔒 <b>STEP TRAIL V5 ACTIVADO</b>\n"
+                           "Gestão de posição: 5 graus de lock progressivo.\n"
+                           "G1 break-even → G2 +$28 → G3 +$38 → G4 +$52 → G5 +$68\n"
+                           "GV6 (SAR M15) desactivado.\n"
+                           "Usa <code>/gv6</code> para mudar.", chat_id)
+
+                elif cmd == "gv6":
+                    global _trail_mode
+                    if _trail_mode == "gv6":
+                        tg("📡 <b>SAR M15 Trailing V6 já está ACTIVO</b>\n"
+                           "Trailing dinâmico + fecho por inversão SAR M15.\n"
+                           "Usa <code>/gv5</code> para mudar para Step Trail.", chat_id)
+                    else:
+                        _trail_mode = "gv6"
+                        tg("📡 <b>SAR M15 TRAILING V6 ACTIVADO</b>\n"
+                           "Gestão de posição: SAR M15 ratchet dinâmico.\n"
+                           "• Fecho automático por inversão SAR M15\n"
+                           "• Alvo: banda H1 oposta\n"
+                           "GV5 (Step Trail) desactivado.\n"
+                           "Usa <code>/gv5</code> para mudar.", chat_id)
 
                 # ── /force [coin] — ordem de mercado bypass filtros ───────────
                 elif cmd == "force":
