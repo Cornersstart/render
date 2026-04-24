@@ -1672,7 +1672,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
     sym     = inst_id.replace("-USDT-SWAP", "")
     dir_txt = "LONG 🟢" if side == "buy" else "SHORT 🔴"
 
-    rsi14, rsi2 = 0.0, 0.0   # defaults (usados na mensagem Telegram)
+    rsi14, rsi2 = get_rsi_dual(inst_id)   # para mensagem Telegram de entrada
 
     if not force:
         # ── BTC SENTINEL — filtro de maré (1H macro + RSI 15m) ──────────────
