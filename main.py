@@ -185,8 +185,12 @@ STATE_FILE = Path(__file__).parent / "bot_state.json"
 def _save_state(authorized: bool) -> None:
     try:
         tmp = STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"authorized": authorized,
-            "updatedAt": datetime.now(timezone.utc).isoformat()}, indent=2))
+        tmp.write_text(json.dumps({
+            "authorized": authorized,
+            "tsar_mode":  _tsar_mode,
+            "trail_mode": _trail_mode,
+            "updatedAt":  datetime.now(timezone.utc).isoformat(),
+        }, indent=2))
         tmp.replace(STATE_FILE)
     except Exception as e:
         log.debug("save_state: %s", e)
@@ -198,6 +202,21 @@ def _load_state() -> bool:
     except Exception:
         pass
     return True
+
+def _load_full_state() -> None:
+    """Restaura authorized + tsar_mode + trail_mode do ficheiro de estado."""
+    global _tsar_mode, _trail_mode
+    try:
+        if STATE_FILE.exists():
+            data = json.loads(STATE_FILE.read_text())
+            with _auth_lock:
+                globals()["_bot_authorized"] = bool(data.get("authorized", True))
+            _tsar_mode  = data.get("tsar_mode",  "")
+            _trail_mode = data.get("trail_mode", "gv5")
+            log.info("Estado restaurado: auth=%s tsar=%r trail=%s",
+                     globals()["_bot_authorized"], _tsar_mode, _trail_mode)
+    except Exception as e:
+        log.warning("_load_full_state: %s", e)
 
 # ── OKX — assinatura ──────────────────────────────────────────────────────────
 def _sign(ts: str, method: str, path: str, body: str = "") -> str:
@@ -3031,6 +3050,7 @@ def telegram_commands_loop() -> None:
                         tg("⚔️ Uso: <code>/tsar on | pause | off | status</code>", chat_id)
                     elif args[0] == "on":
                         _tsar_mode = "on"
+                        _save_state(_bot_authorized)
                         tg("⚔️ <b>TSAR V11 ACTIVADO</b>\n"
                            "─────────────────────────────\n"
                            "Pares: <b>BNB · SOL · ETH</b>\n"
@@ -3042,10 +3062,12 @@ def telegram_commands_loop() -> None:
                            "Usa <code>/tsar off</code> para desligar.", chat_id)
                     elif args[0] == "pause":
                         _tsar_mode = "paused"
+                        _save_state(_bot_authorized)
                         tg("⏸ <b>TSAR PAUSADO</b>\n"
                            "Sem novas entradas. Posições abertas continuam geridas.", chat_id)
                     elif args[0] in ("off", "stop"):
                         _tsar_mode = ""
+                        _save_state(_bot_authorized)
                         tg("🔓 <b>TSAR DESLIGADO</b>\nFVG e outras estratégias retomadas.", chat_id)
                     elif args[0] == "status":
                         try: tg(_tsar_status_text(), chat_id)
@@ -3559,9 +3581,10 @@ if __name__ == "__main__":
     log.info("╚══════════════════════════════════════════════════════╝")
 
     # Estado persistido
+    _load_full_state()
     with _auth_lock:
-        _bot_authorized = _load_state()
-    log.info("Estado: %s", "AUTORIZADO ✅" if _bot_authorized else "PAUSADO ⛔")
+        log.info("Estado: %s | tsar=%r | trail=%s",
+                 "AUTORIZADO ✅" if _bot_authorized else "PAUSADO ⛔", _tsar_mode, _trail_mode)
 
     # Leverage — inclui BNB (V9)
     for sym in ALL_SYMS:
