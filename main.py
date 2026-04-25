@@ -162,6 +162,7 @@ _priority_mode: str    = ""      # "" = off | "ichimoku" = alinhamento com nuvem
 _armadilha_mode: bool  = False   # False = off | True = Bollinger mean-reversion activo
 _trail_mode: str       = "gv5"   # "gv5" = Step Trail V5 | "gv6" = SAR M15 trailing
 _tsar_mode: str        = "on"    # "on" = activo por defeito | "" = off | "paused" = sem novas entradas
+_tsar_pol_mode: str    = "on"    # POL SNIPER TSAR | "on" = activo | "" = off | "paused" = sem novas entradas
 
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
@@ -191,6 +192,7 @@ def _save_state(authorized: bool) -> None:
         tmp.write_text(json.dumps({
             "authorized":       authorized,
             "tsar_mode":        _tsar_mode,
+            "tsar_pol_mode":    _tsar_pol_mode,
             "trail_mode":       _trail_mode,
             "strategy_enabled": st_snap,
             "updatedAt":        datetime.now(timezone.utc).isoformat(),
@@ -208,15 +210,16 @@ def _load_state() -> bool:
     return True
 
 def _load_full_state() -> None:
-    """Restaura authorized + tsar_mode + trail_mode + strategy_enabled do ficheiro de estado."""
-    global _tsar_mode, _trail_mode
+    """Restaura authorized + tsar_mode + tsar_pol_mode + trail_mode + strategy_enabled do ficheiro de estado."""
+    global _tsar_mode, _tsar_pol_mode, _trail_mode
     try:
         if STATE_FILE.exists():
             data = json.loads(STATE_FILE.read_text())
             with _auth_lock:
                 globals()["_bot_authorized"] = bool(data.get("authorized", True))
-            _tsar_mode  = data.get("tsar_mode",  "")
-            _trail_mode = data.get("trail_mode", "gv5")
+            _tsar_mode     = data.get("tsar_mode",     "on")
+            _tsar_pol_mode = data.get("tsar_pol_mode", "on")
+            _trail_mode    = data.get("trail_mode", "gv5")
             saved_st = data.get("strategy_enabled", {})
             if saved_st:
                 with _strategy_lock:
@@ -1218,6 +1221,76 @@ def tsar_signal(inst_id: str) -> str | None:
         log.warning("tsar_signal %s: %s", inst_id, e)
         return None
 
+def tsar_pol_signal(inst_id: str) -> str | None:
+    """POL SNIPER TSAR — Regra da Inversão Total.
+    Ichimoku 1H = alvo/contexto apenas, nunca gatilho.
+    Lightning trigger: RSI2 M5 ≤ 1.0 (LONG) ou ≥ 90.0 (SHORT) + preço fora da BB → entrada imediata.
+    Standard: BB M5+M15 furo + RSI2 < 12 / > 88 + SAR M5 flip.
+    A direcção do Ichimoku avisa mas a trade é SEMPRE a exaustão oposta.
+    """
+    try:
+        df5  = okx_candles(inst_id, bar="5m",  limit=100)
+        df15 = okx_candles(inst_id, bar="15m", limit=60)
+        c5   = df5["close"]
+
+        # Bollinger M5
+        mid5  = c5.rolling(BB_PERIOD).mean()
+        std5  = c5.rolling(BB_PERIOD).std()
+        up5_p = float((mid5 + BB_STD * std5).iloc[-2])
+        lo5_p = float((mid5 - BB_STD * std5).iloc[-2])
+        up5_c = float((mid5 + BB_STD * std5).iloc[-1])
+        lo5_c = float((mid5 - BB_STD * std5).iloc[-1])
+        px_p  = float(c5.iloc[-2])
+        px_c  = float(c5.iloc[-1])
+
+        # RSI2 M5
+        delta = c5.diff()
+        gain  = delta.clip(lower=0).ewm(span=2, adjust=False).mean()
+        loss  = (-delta).clip(lower=0).ewm(span=2, adjust=False).mean()
+        rsi2  = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
+
+        # ── LIGHTNING TRIGGER: RSI2 ≤ 1.0 / ≥ 90.0 + fora da banda ─────────
+        if rsi2 >= 90.0 and px_c > up5_c:
+            log.info("⚡ POL LIGHTNING SHORT RSI2=%.1f px>up5", rsi2)
+            return "sell"
+        if rsi2 <= 1.0 and px_c < lo5_c:
+            log.info("⚡ POL LIGHTNING LONG RSI2=%.1f px<lo5", rsi2)
+            return "buy"
+
+        # ── STANDARD: furo BB M5+M15 + RSI2 12/88 + SAR M5 flip ─────────────
+        was_above = px_p > up5_p
+        was_below = px_p < lo5_p
+        if not (was_above or was_below):
+            return None
+
+        back_above = was_above and px_c <= up5_c
+        back_below = was_below and px_c >= lo5_c
+        if not (back_above or back_below):
+            return None
+
+        if back_above and rsi2 < 88: return None
+        if back_below and rsi2 > 12: return None
+
+        # BB M15 também fora na vela anterior
+        c15   = df15["close"]
+        mid15 = c15.rolling(BB_PERIOD).mean()
+        std15 = c15.rolling(BB_PERIOD).std()
+        up15  = float((mid15 + BB_STD * std15).iloc[-2])
+        lo15  = float((mid15 - BB_STD * std15).iloc[-2])
+        px15  = float(c15.iloc[-2])
+        if back_above and px15 <= up15: return None
+        if back_below and px15 >= lo15: return None
+
+        # SAR M5 flip na direcção certa
+        sar_dir = "bull" if back_below else "bear"
+        if not _sar_just_inverted(inst_id, sar_dir):
+            return None
+
+        return "sell" if back_above else "buy"
+    except Exception as e:
+        log.warning("tsar_pol_signal %s: %s", inst_id, e)
+        return None
+
 def _tsar_btc_boost() -> tuple[bool, float]:
     """Retorna (boost, rsi_btc). boost=True se BTC RSI M15 < 30 ou > 70 (extremos)."""
     try:
@@ -1867,7 +1940,8 @@ def get_btc_sentiment() -> tuple[str, bool, float, float, float]:
 
 def _fire(inst_id: str, side: str, signal_name: str,
           tag: str = "DUO ELITE", sl_pct: float | None = None,
-          force: bool = False, qty_mult: float = 1.0) -> bool:
+          force: bool = False, qty_mult: float = 1.0,
+          tsar_monitor: bool = False) -> bool:
     """Executa ordem market + SL inicial + Step Trail V5.
 
     Filtros antes da ordem (ignorados se force=True):
@@ -2058,7 +2132,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
     threading.Thread(target=_monitor,
         args=(inst_id, ps, side, avg, sl_px, activate_px, sym, dir_txt, bal, qty),
         kwargs={"tag": tag, "armadilha": (_armadilha_mode or _trail_mode == "gv6"),
-                "tsar": (_tsar_mode == "on")},
+                "tsar": (_tsar_mode == "on" or tsar_monitor)},
         daemon=True, name=f"mon_{sym}").start()
     return True
 
@@ -2784,7 +2858,8 @@ def _status_text() -> str:
     trail_txt = ("🔒 GV5 Step Trail" if _trail_mode == "gv5" else "📡 GV6 SAR M15")
     arm_txt   = "🪤 ARMADILHA ON" if _armadilha_mode else ""
     tsar_txt  = f"⚔️ TSAR {'ON' if _tsar_mode == 'on' else 'PAUSED'}" if _tsar_mode else ""
-    modes_txt = " | ".join(filter(None, [trail_txt, arm_txt, tsar_txt]))
+    tpol_txt  = f"🎯 TSAR POL {'ON' if _tsar_pol_mode == 'on' else 'PAUSED'}" if _tsar_pol_mode else ""
+    modes_txt = " | ".join(filter(None, [trail_txt, arm_txt, tsar_txt, tpol_txt]))
     return (f"📊 <b>COMMANDER V11 — {datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}</b>\n"
             f"💰 {bal_str}\n"
             f"Status: {status}\n"
@@ -2796,6 +2871,7 @@ def _status_text() -> str:
             f"/tp /radar /lpd /meta /status /panic\n"
             f"/go[coin] /gv5 /gv6 /force [coin] /risco\n"
             f"/tsar on|pause|off|status\n"
+            f"/tsarpol on|pause|off|status\n"
             f"/subir [2-10]  |  /armadilha  |  /pr ichimoku\n"
             f"/pause → só /start desbloqueia")
 
@@ -2821,7 +2897,7 @@ _GO_MAP = {
 }
 
 def telegram_commands_loop() -> None:
-    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode
+    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode
     if not TELEGRAM_TOKEN:
         log.warning("TELEGRAM_TOKEN não configurado — comandos desativados.")
         return
@@ -2956,8 +3032,11 @@ def telegram_commands_loop() -> None:
                         lines.append(f"{icon} — {label}")
                     tsar_icon = "✅ ON " if _tsar_mode == "on" else ("⏸ PAU" if _tsar_mode == "paused" else "⛔ OFF")
                     lines.append(f"{tsar_icon} — ⚔️ BNB/SOL/ETH  TSAR V11 (Expulsão)")
+                    tpol_icon = "✅ ON " if _tsar_pol_mode == "on" else ("⏸ PAU" if _tsar_pol_mode == "paused" else "⛔ OFF")
+                    lines.append(f"{tpol_icon} — 🎯 POL  SNIPER TSAR (Inversão Total)")
                     lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>\n"
-                                 "<i>/tsar on | pause | off | status</i>")
+                                 "<i>/tsar on | pause | off | status</i>\n"
+                                 "<i>/tsarpol on | pause | off | status</i>")
                     tg("\n".join(lines), chat_id)
 
                 # ── /sentinel [on|off] — toggle ou força estado BTC Sentinel ───
@@ -3088,6 +3167,58 @@ def telegram_commands_loop() -> None:
                         except Exception as e: tg(f"Erro /tsar status: {e}", chat_id)
                     else:
                         tg("❌ Opções: <code>/tsar on | pause | off | status</code>", chat_id)
+
+                # ── /tsarpol — POL SNIPER TSAR ─────────────────────────────────
+                elif cmd == "tsarpol":
+                    if not args:
+                        tg("🎯 Uso: <code>/tsarpol on | pause | off | status</code>", chat_id)
+                    elif args[0] == "on":
+                        _tsar_pol_mode = "on"
+                        _save_state(_bot_authorized)
+                        tg("🎯 <b>POL SNIPER TSAR ACTIVADO</b>\n"
+                           "─────────────────────────────\n"
+                           "Par: <b>POL-USDT-SWAP</b>\n"
+                           "• Inversão Total: Ichimoku 1H é contexto, nunca gatilho\n"
+                           "• Lightning: RSI2 ≤ 1 ou ≥ 90 + fora da BB → entrada imediata\n"
+                           "• Standard: BB M5+M15 + RSI2 &lt;12/&gt;88 + SAR M5 flip\n"
+                           "• SL hard: <b>2%%</b> | Lock $30 → SAR M15 trailing\n"
+                           "Usa <code>/tsarpol off</code> para desligar.", chat_id)
+                    elif args[0] == "pause":
+                        _tsar_pol_mode = "paused"
+                        _save_state(_bot_authorized)
+                        tg("⏸ <b>POL SNIPER TSAR PAUSADO</b>\n"
+                           "Sem novas entradas. Posições abertas continuam geridas.", chat_id)
+                    elif args[0] in ("off", "stop"):
+                        _tsar_pol_mode = ""
+                        _save_state(_bot_authorized)
+                        tg("🔓 <b>POL SNIPER TSAR DESLIGADO</b>\nIchimoku POL retoma se activado.", chat_id)
+                    elif args[0] == "status":
+                        try:
+                            boost, btc_rsi = _tsar_btc_boost()
+                            boost_txt = "⚡ EXTREMO → +50%% size" if boost else "normal"
+                            df5 = okx_candles(GOLD_POL, bar="5m", limit=30)
+                            c5  = df5["close"]
+                            d   = c5.diff()
+                            g   = d.clip(lower=0).ewm(span=2, adjust=False).mean()
+                            l   = (-d).clip(lower=0).ewm(span=2, adjust=False).mean()
+                            rsi2 = float(100 - (100 / (1 + g.iloc[-1] / (l.iloc[-1] + 1e-10))))
+                            sar15 = _get_sar_m15_px(GOLD_POL)
+                            psar5 = df5.ta.psar(af0=0.02, af=0.02, max_af=0.20)
+                            col_l = next((c for c in psar5.columns if "PSARl" in c), None)
+                            sar5_bull = bool(col_l and not pd.isna(psar5[col_l].iloc[-1]))
+                            h1_bull   = _h1_trend_bull(GOLD_POL)
+                            ichi_sig  = None
+                            try: ichi_sig = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
+                            except Exception: pass
+                            ichi_txt = f"Ichimoku 1H: {'↑ LONG' if ichi_sig=='buy' else '↓ SHORT' if ichi_sig=='sell' else 'neutro'}"
+                            tg(f"🎯 <b>POL SNIPER TSAR STATUS</b> — modo: <b>{'ON' if _tsar_pol_mode=='on' else 'PAUSED' if _tsar_pol_mode=='paused' else 'OFF'}</b>\n"
+                               f"BTC RSI M15: <b>{btc_rsi:.1f}</b> ({boost_txt})\n"
+                               f"<b>POL</b>: SAR M5 {'🟢 BULL' if sar5_bull else '🔴 BEAR'} | SAR M15: {sar15:.5f} | RSI2: {rsi2:.1f} | H1 {'↑' if h1_bull else '↓'}\n"
+                               f"{ichi_txt} (contexto — não é gatilho)", chat_id)
+                        except Exception as e:
+                            tg(f"Erro /tsarpol status: {e}", chat_id)
+                    else:
+                        tg("❌ Opções: <code>/tsarpol on | pause | off | status</code>", chat_id)
 
                 elif cmd in ("status", "s"):
                     try: tg(_status_text(), chat_id)
@@ -3341,6 +3472,33 @@ def duo_elite_loop() -> None:
                         log.info("[POL] sem sinal")
                 except Exception as e:
                     log.error("[POL] %s", e)
+
+            # ── 🎯 POL SNIPER TSAR — Regra da Inversão Total ─────────────────
+            if not fired and _tsar_pol_mode == "on":
+                try:
+                    sig = tsar_pol_signal(GOLD_POL)
+                    if sig:
+                        ichi_ctx = None
+                        try: ichi_ctx = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
+                        except Exception: pass
+                        ichi_note = ""
+                        if ichi_ctx == sig:
+                            ichi_note = " | Ichimoku ALINHADO"
+                        elif ichi_ctx and ichi_ctx != sig:
+                            ichi_note = f" | Ichimoku {'↑' if ichi_ctx=='buy' else '↓'} mas EXAUSTÃO domina"
+                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                        log.info("🎯 TSAR POL %s%s", sig.upper(), ichi_note)
+                        tg(f"🎯 <b>POL SNIPER TSAR — INVERSÃO TOTAL</b>\n"
+                           f"Par: <code>POL-USDT-SWAP</code> | {dir_scout}{ichi_note}\n"
+                           f"BB M5+M15 exaustão + RSI2 flip | SL {TSAR_SL_PCT:.0f}%%\n"
+                           f"Saída: SAR M15 inversão ou lock $30")
+                        fired = _fire(GOLD_POL, sig, "TSAR POL",
+                                      tag="🎯 SNIPER POL", sl_pct=TSAR_SL_PCT,
+                                      qty_mult=1.0, tsar_monitor=True)
+                    else:
+                        log.debug("[TSAR POL] sem sinal")
+                except Exception as e:
+                    log.error("[TSAR POL] %s", e)
 
             # ── 🌊 PRIORIDADE 2: SOL — SUPERTREND 15m (95% hit, HOLD) ───────
             if not fired and st_enabled["supertrend"]:
