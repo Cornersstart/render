@@ -1249,15 +1249,15 @@ def tsar_pol_signal(inst_id: str) -> str | None:
         loss  = (-delta).clip(lower=0).ewm(span=2, adjust=False).mean()
         rsi2  = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
 
-        # ── LIGHTNING TRIGGER: RSI2 ≤ 1.0 / ≥ 90.0 + fora da banda ─────────
+        # ── LIGHTNING TRIGGER: RSI2 ≤ 10 / ≥ 90 + fora da banda ─────────────
         if rsi2 >= 90.0 and px_c > up5_c:
             log.info("⚡ POL LIGHTNING SHORT RSI2=%.1f px>up5", rsi2)
             return "sell"
-        if rsi2 <= 1.0 and px_c < lo5_c:
+        if rsi2 <= 10.0 and px_c < lo5_c:
             log.info("⚡ POL LIGHTNING LONG RSI2=%.1f px<lo5", rsi2)
             return "buy"
 
-        # ── STANDARD: furo BB M5+M15 + RSI2 12/88 + SAR M5 flip ─────────────
+        # ── STANDARD: furo BB M5+M15 + RSI2 10/90 + SAR M5 flip ─────────────
         was_above = px_p > up5_p
         was_below = px_p < lo5_p
         if not (was_above or was_below):
@@ -1268,8 +1268,8 @@ def tsar_pol_signal(inst_id: str) -> str | None:
         if not (back_above or back_below):
             return None
 
-        if back_above and rsi2 < 88: return None
-        if back_below and rsi2 > 12: return None
+        if back_above and rsi2 < 90: return None
+        if back_below and rsi2 > 10: return None
 
         # BB M15 também fora na vela anterior
         c15   = df15["close"]
@@ -3494,7 +3494,7 @@ def duo_elite_loop() -> None:
                            f"Saída: SAR M15 inversão ou lock $30")
                         fired = _fire(GOLD_POL, sig, "TSAR POL",
                                       tag="🎯 SNIPER POL", sl_pct=TSAR_SL_PCT,
-                                      qty_mult=1.0, tsar_monitor=True)
+                                      force=True, qty_mult=1.0, tsar_monitor=True)
                     else:
                         log.debug("[TSAR POL] sem sinal")
                 except Exception as e:
