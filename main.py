@@ -1218,10 +1218,10 @@ def tsar_signal(inst_id: str) -> str | None:
 
         candidate_side = "sell" if back_above else "buy"
         cloud = _ichimoku_cloud_dir(inst_id)
-        if candidate_side == "sell" and cloud == "bear":
-            log.info("[TSAR] %s SHORT bloqueado — cloud BEARISH", inst_id); return None
-        if candidate_side == "buy" and cloud == "bull":
-            log.info("[TSAR] %s LONG bloqueado — cloud BULLISH", inst_id); return None
+        if candidate_side == "sell" and cloud == "bull":
+            log.info("[TSAR] %s SHORT bloqueado — cloud BULLISH", inst_id); return None
+        if candidate_side == "buy" and cloud == "bear":
+            log.info("[TSAR] %s LONG bloqueado — cloud BEARISH", inst_id); return None
         return candidate_side
     except Exception as e:
         log.warning("tsar_signal %s: %s", inst_id, e)
@@ -1279,11 +1279,11 @@ def tsar_pol_signal(inst_id: str) -> tuple[str, float] | None:
 
         # Ichimoku 1H cloud — confirmação (neutro = permitido)
         cloud_dir = _ichimoku_cloud_dir(inst_id)
-        if candidate == "sell" and cloud_dir == "bear":
-            log.info("[TSAR POL] SHORT bloqueado — Ichimoku cloud BEARISH")
+        if candidate == "sell" and cloud_dir == "bull":
+            log.info("[TSAR POL] SHORT bloqueado — Ichimoku cloud BULLISH")
             return None
-        if candidate == "buy" and cloud_dir == "bull":
-            log.info("[TSAR POL] LONG bloqueado — Ichimoku cloud BULLISH")
+        if candidate == "buy" and cloud_dir == "bear":
+            log.info("[TSAR POL] LONG bloqueado — Ichimoku cloud BEARISH")
             return None
 
         # Filtro anti-ignição (engolfo + SAR duplo + safety)
