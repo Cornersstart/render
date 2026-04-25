@@ -1252,10 +1252,14 @@ def tsar_pol_signal(inst_id: str) -> str | None:
         # ── LIGHTNING TRIGGER: RSI2 ≤ 10 / ≥ 90 + fora da banda ─────────────
         if rsi2 >= 90.0 and px_c > up5_c:
             log.info("⚡ POL LIGHTNING SHORT RSI2=%.1f px>up5", rsi2)
-            return "sell"
+            if _pol_trend_filter_ok("sell", df5, df15, is_lightning=True):
+                return "sell"
+            return None
         if rsi2 <= 10.0 and px_c < lo5_c:
             log.info("⚡ POL LIGHTNING LONG RSI2=%.1f px<lo5", rsi2)
-            return "buy"
+            if _pol_trend_filter_ok("buy", df5, df15, is_lightning=True):
+                return "buy"
+            return None
 
         # ── STANDARD: furo BB M5+M15 + RSI2 10/90 + SAR M5 flip ─────────────
         was_above = px_p > up5_p
@@ -1286,10 +1290,74 @@ def tsar_pol_signal(inst_id: str) -> str | None:
         if not _sar_just_inverted(inst_id, sar_dir):
             return None
 
-        return "sell" if back_above else "buy"
+        candidate = "sell" if back_above else "buy"
+        if not _pol_trend_filter_ok(candidate, df5, df15, is_lightning=False):
+            return None
+        return candidate
     except Exception as e:
         log.warning("tsar_pol_signal %s: %s", inst_id, e)
         return None
+
+def _pol_trend_filter_ok(side: str, df5: pd.DataFrame, df15: pd.DataFrame,
+                          is_lightning: bool = False) -> bool:
+    """Filtro anti-ignição de tendência para POL SNIPER TSAR.
+    Bloqueia se: engolfo bullish/bearish nos últimos 3 M5, ou SAR M5+M15 sincronia dupla.
+    Standard (não-lightning): exige também SAR M5 na direcção + preço abaixo/acima do BB mid.
+    """
+    try:
+        c5 = df5["close"]
+        o5 = df5["open"]
+
+        # 1. Engolfo detector (últimas 3 velas M5 completas)
+        avg_body = (c5 - o5).abs().rolling(20).mean()
+        for i in [-4, -3, -2]:
+            avg_b = float(avg_body.iloc[i])
+            if avg_b == 0 or pd.isna(avg_b): continue
+            body_curr = abs(float(c5.iloc[i]) - float(o5.iloc[i]))
+            bull_eng = (float(c5.iloc[i]) > float(o5.iloc[i]) and
+                        float(c5.iloc[i]) > float(c5.iloc[i-1]) and
+                        float(o5.iloc[i]) < float(o5.iloc[i-1]) and
+                        body_curr >= 2 * avg_b)
+            bear_eng = (float(c5.iloc[i]) < float(o5.iloc[i]) and
+                        float(c5.iloc[i]) < float(c5.iloc[i-1]) and
+                        float(o5.iloc[i]) > float(o5.iloc[i-1]) and
+                        body_curr >= 2 * avg_b)
+            if side == "sell" and bull_eng:
+                log.info("[POL FILTER] Bullish engolfo M5 → SHORT BLOQUEADO"); return False
+            if side == "buy" and bear_eng:
+                log.info("[POL FILTER] Bearish engolfo M5 → LONG BLOQUEADO"); return False
+
+        # 2. SAR M5 + M15 sincronia dupla → bloqueia contra-tendência
+        psar5  = df5.ta.psar(af0=0.02, af=0.02, max_af=0.20)
+        psar15 = df15.ta.psar(af0=0.02, af=0.02, max_af=0.20)
+        col_l5  = next((c for c in psar5.columns  if "PSARl" in c), None)
+        col_l15 = next((c for c in psar15.columns if "PSARl" in c), None)
+        sar5_bull  = bool(col_l5  and not pd.isna(psar5[col_l5].iloc[-1]))
+        sar15_bull = bool(col_l15 and not pd.isna(psar15[col_l15].iloc[-1]))
+
+        if side == "sell" and sar5_bull and sar15_bull:
+            log.info("[POL FILTER] SAR M5+M15 ambos BULL → SHORT PROIBIDO"); return False
+        if side == "buy" and (not sar5_bull) and (not sar15_bull):
+            log.info("[POL FILTER] SAR M5+M15 ambos BEAR → LONG PROIBIDO"); return False
+
+        # 3. Safety (standard apenas): SAR M5 na direcção certa + preço cruzou BB mid
+        if not is_lightning:
+            mid5   = c5.rolling(BB_PERIOD).mean()
+            bb_mid = float(mid5.iloc[-1])
+            px_c   = float(c5.iloc[-1])
+            if side == "sell" and (sar5_bull or px_c >= bb_mid):
+                log.info("[POL FILTER] SHORT safety: SAR5=%s px=%.5f mid=%.5f → BLOQUEADO",
+                         'bull' if sar5_bull else 'bear', px_c, bb_mid)
+                return False
+            if side == "buy" and ((not sar5_bull) or px_c <= bb_mid):
+                log.info("[POL FILTER] LONG safety: SAR5=%s px=%.5f mid=%.5f → BLOQUEADO",
+                         'bull' if sar5_bull else 'bear', px_c, bb_mid)
+                return False
+
+        return True
+    except Exception as e:
+        log.warning("_pol_trend_filter_ok: %s", e)
+        return True   # em erro, permite entrada
 
 def _tsar_btc_boost() -> tuple[bool, float]:
     """Retorna (boost, rsi_btc). boost=True se BTC RSI M15 < 30 ou > 70 (extremos)."""
