@@ -1216,7 +1216,13 @@ def tsar_signal(inst_id: str) -> str | None:
         if not _sar_just_inverted(inst_id, sar_dir):
             return None
 
-        return "sell" if back_above else "buy"
+        candidate_side = "sell" if back_above else "buy"
+        cloud = _ichimoku_cloud_dir(inst_id)
+        if candidate_side == "sell" and cloud == "bear":
+            log.info("[TSAR] %s SHORT bloqueado — cloud BEARISH", inst_id); return None
+        if candidate_side == "buy" and cloud == "bull":
+            log.info("[TSAR] %s LONG bloqueado — cloud BULLISH", inst_id); return None
+        return candidate_side
     except Exception as e:
         log.warning("tsar_signal %s: %s", inst_id, e)
         return None
@@ -1273,11 +1279,11 @@ def tsar_pol_signal(inst_id: str) -> tuple[str, float] | None:
 
         # Ichimoku 1H cloud — confirmação (neutro = permitido)
         cloud_dir = _ichimoku_cloud_dir(inst_id)
-        if candidate == "sell" and cloud_dir == "bull":
-            log.info("[TSAR POL] SHORT bloqueado — Ichimoku cloud BULLISH")
+        if candidate == "sell" and cloud_dir == "bear":
+            log.info("[TSAR POL] SHORT bloqueado — Ichimoku cloud BEARISH")
             return None
-        if candidate == "buy" and cloud_dir == "bear":
-            log.info("[TSAR POL] LONG bloqueado — Ichimoku cloud BEARISH")
+        if candidate == "buy" and cloud_dir == "bull":
+            log.info("[TSAR POL] LONG bloqueado — Ichimoku cloud BULLISH")
             return None
 
         # Filtro anti-ignição (engolfo + SAR duplo + safety)
@@ -3689,7 +3695,8 @@ def duo_elite_loop() -> None:
                                f"{'LONG 🟢' if sig=='buy' else 'SHORT 🔴'} | SL 2%%{boost_info}\n"
                                f"BB M5+M15 rompida + RSI2 exaustão + SAR M5 inverteu")
                             fired = _fire(_ti, sig, f"TSAR V11 {_ts}",
-                                          tag=f"⚔️ TSAR {_ts}", sl_pct=TSAR_SL_PCT, qty_mult=qm)
+                                          tag=f"⚔️ TSAR {_ts}", sl_pct=TSAR_SL_PCT,
+                                          force=True, qty_mult=qm)
                         else:
                             log.debug("[TSAR/%s] sem sinal", _ts)
                     except Exception as e:
