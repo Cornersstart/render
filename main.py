@@ -1221,12 +1221,12 @@ def tsar_signal(inst_id: str) -> str | None:
         log.warning("tsar_signal %s: %s", inst_id, e)
         return None
 
-def tsar_pol_signal(inst_id: str) -> str | None:
-    """POL SNIPER TSAR — Regra da Inversão Total.
-    Ichimoku 1H = alvo/contexto apenas, nunca gatilho.
-    Lightning trigger: RSI2 M5 ≤ 1.0 (LONG) ou ≥ 90.0 (SHORT) + preço fora da BB → entrada imediata.
-    Standard: BB M5+M15 furo + RSI2 < 12 / > 88 + SAR M5 flip.
-    A direcção do Ichimoku avisa mas a trade é SEMPRE a exaustão oposta.
+def tsar_pol_signal(inst_id: str) -> tuple[str, float] | None:
+    """POL SNIPER TSAR — Confirmação Dupla.
+    Trigger : BB M5+M15 toque (banda superior/inferior) + SAR M5 inversão.
+    Confirm : Ichimoku 1H cloud na mesma direcção (não bloqueia se neutro).
+    Filtro  : _pol_trend_filter_ok() anti-ignição.
+    Retorna (side, sar5_px) onde sar5_px é o SL dinâmico, ou None.
     """
     try:
         df5  = okx_candles(inst_id, bar="5m",  limit=100)
@@ -1234,66 +1234,57 @@ def tsar_pol_signal(inst_id: str) -> str | None:
         c5   = df5["close"]
 
         # Bollinger M5
-        mid5  = c5.rolling(BB_PERIOD).mean()
-        std5  = c5.rolling(BB_PERIOD).std()
-        up5_p = float((mid5 + BB_STD * std5).iloc[-2])
-        lo5_p = float((mid5 - BB_STD * std5).iloc[-2])
-        up5_c = float((mid5 + BB_STD * std5).iloc[-1])
-        lo5_c = float((mid5 - BB_STD * std5).iloc[-1])
-        px_p  = float(c5.iloc[-2])
-        px_c  = float(c5.iloc[-1])
+        mid5 = c5.rolling(BB_PERIOD).mean()
+        std5 = c5.rolling(BB_PERIOD).std()
+        up5  = float((mid5 + BB_STD * std5).iloc[-1])
+        lo5  = float((mid5 - BB_STD * std5).iloc[-1])
+        px_c = float(c5.iloc[-1])
 
-        # RSI2 M5
-        delta = c5.diff()
-        gain  = delta.clip(lower=0).ewm(span=2, adjust=False).mean()
-        loss  = (-delta).clip(lower=0).ewm(span=2, adjust=False).mean()
-        rsi2  = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
-
-        # ── LIGHTNING TRIGGER: RSI2 ≤ 10 / ≥ 90 + fora da banda ─────────────
-        if rsi2 >= 90.0 and px_c > up5_c:
-            log.info("⚡ POL LIGHTNING SHORT RSI2=%.1f px>up5", rsi2)
-            if _pol_trend_filter_ok("sell", df5, df15, is_lightning=True):
-                return "sell"
-            return None
-        if rsi2 <= 10.0 and px_c < lo5_c:
-            log.info("⚡ POL LIGHTNING LONG RSI2=%.1f px<lo5", rsi2)
-            if _pol_trend_filter_ok("buy", df5, df15, is_lightning=True):
-                return "buy"
-            return None
-
-        # ── STANDARD: furo BB M5+M15 + RSI2 10/90 + SAR M5 flip ─────────────
-        was_above = px_p > up5_p
-        was_below = px_p < lo5_p
-        if not (was_above or was_below):
-            return None
-
-        back_above = was_above and px_c <= up5_c
-        back_below = was_below and px_c >= lo5_c
-        if not (back_above or back_below):
-            return None
-
-        if back_above and rsi2 < 90: return None
-        if back_below and rsi2 > 10: return None
-
-        # BB M15 também fora na vela anterior
+        # Bollinger M15
         c15   = df15["close"]
         mid15 = c15.rolling(BB_PERIOD).mean()
         std15 = c15.rolling(BB_PERIOD).std()
-        up15  = float((mid15 + BB_STD * std15).iloc[-2])
-        lo15  = float((mid15 - BB_STD * std15).iloc[-2])
-        px15  = float(c15.iloc[-2])
-        if back_above and px15 <= up15: return None
-        if back_below and px15 >= lo15: return None
+        up15  = float((mid15 + BB_STD * std15).iloc[-1])
+        lo15  = float((mid15 - BB_STD * std15).iloc[-1])
+        px15  = float(c15.iloc[-1])
 
-        # SAR M5 flip na direcção certa
-        sar_dir = "bull" if back_below else "bear"
+        tol = BB_TOL_PCT / 100
+        at_upper = (px_c >= up5 * (1 - tol)) and (px15 >= up15 * (1 - tol))
+        at_lower = (px_c <= lo5 * (1 + tol)) and (px15 <= lo15 * (1 + tol))
+
+        if not (at_upper or at_lower):
+            return None
+
+        candidate = "sell" if at_upper else "buy"
+
+        # SAR M5 acabou de inverter na direcção certa
+        sar_dir = "bear" if candidate == "sell" else "bull"
         if not _sar_just_inverted(inst_id, sar_dir):
             return None
 
-        candidate = "sell" if back_above else "buy"
+        # SAR M5 price → SL dinâmico
+        psar5  = df5.ta.psar(af0=0.02, af=0.02, max_af=0.20)
+        col_l5 = next((c for c in psar5.columns if "PSARl" in c), None)
+        col_s5 = next((c for c in psar5.columns if "PSARs" in c), None)
+        sar5_px = 0.0
+        if col_l5 and col_s5:
+            sar5_bull = not pd.isna(psar5[col_l5].iloc[-1])
+            sar5_px = float(psar5[col_l5].iloc[-1] if sar5_bull else psar5[col_s5].iloc[-1])
+
+        # Ichimoku 1H cloud — confirmação (neutro = permitido)
+        cloud_dir = _ichimoku_cloud_dir(inst_id)
+        if candidate == "sell" and cloud_dir == "bull":
+            log.info("[TSAR POL] SHORT bloqueado — Ichimoku cloud BULLISH")
+            return None
+        if candidate == "buy" and cloud_dir == "bear":
+            log.info("[TSAR POL] LONG bloqueado — Ichimoku cloud BEARISH")
+            return None
+
+        # Filtro anti-ignição (engolfo + SAR duplo + safety)
         if not _pol_trend_filter_ok(candidate, df5, df15, is_lightning=False):
             return None
-        return candidate
+
+        return (candidate, sar5_px)
     except Exception as e:
         log.warning("tsar_pol_signal %s: %s", inst_id, e)
         return None
@@ -2009,7 +2000,7 @@ def get_btc_sentiment() -> tuple[str, bool, float, float, float]:
 def _fire(inst_id: str, side: str, signal_name: str,
           tag: str = "DUO ELITE", sl_pct: float | None = None,
           force: bool = False, qty_mult: float = 1.0,
-          tsar_monitor: bool = False) -> bool:
+          tsar_monitor: bool = False, sl_px_override: float = 0.0) -> bool:
     """Executa ordem market + SL inicial + Step Trail V5.
 
     Filtros antes da ordem (ignorados se force=True):
@@ -2178,8 +2169,10 @@ def _fire(inst_id: str, side: str, signal_name: str,
             break
 
     # ── Configurar SL + Step Trail V5 ────────────────────────────────────────
-    # SL dinâmico: usa preço do SAR M5 se estiver no lado correcto, senão usa %
-    if sar_px > 0 and ((side == "buy" and sar_px < avg) or (side == "sell" and sar_px > avg)):
+    # Prioridade: sl_px_override (SAR M5 externo) > sar_px interno > sl_pct %
+    if sl_px_override > 0 and ((side == "buy" and sl_px_override < avg) or (side == "sell" and sl_px_override > avg)):
+        sl_px = sl_px_override
+    elif sar_px > 0 and ((side == "buy" and sar_px < avg) or (side == "sell" and sar_px > avg)):
         sl_px = sar_px
     else:
         sl_px = avg * (1 - sl_pct / 100) if side == "buy" else avg * (1 + sl_pct / 100)
@@ -3541,28 +3534,25 @@ def duo_elite_loop() -> None:
                 except Exception as e:
                     log.error("[POL] %s", e)
 
-            # ── 🎯 POL SNIPER TSAR — Regra da Inversão Total ─────────────────
+            # ── 🎯 POL SNIPER TSAR — Confirmação Dupla BB+SAR+Ichimoku ─────────
             if not fired and _tsar_pol_mode == "on":
                 try:
-                    sig = tsar_pol_signal(GOLD_POL)
-                    if sig:
-                        ichi_ctx = None
-                        try: ichi_ctx = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
-                        except Exception: pass
-                        ichi_note = ""
-                        if ichi_ctx == sig:
-                            ichi_note = " | Ichimoku ALINHADO"
-                        elif ichi_ctx and ichi_ctx != sig:
-                            ichi_note = f" | Ichimoku {'↑' if ichi_ctx=='buy' else '↓'} mas EXAUSTÃO domina"
+                    result = tsar_pol_signal(GOLD_POL)
+                    if result:
+                        sig, sar5_px = result
+                        cloud_dir = _ichimoku_cloud_dir(GOLD_POL)
+                        ichi_note = (f" | ☁️ Ichimoku {'↑ bull' if cloud_dir=='bull' else '↓ bear' if cloud_dir=='bear' else '~ neutro'}")
                         dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🎯 TSAR POL %s%s", sig.upper(), ichi_note)
-                        tg(f"🎯 <b>POL SNIPER TSAR — INVERSÃO TOTAL</b>\n"
+                        sl_note   = f"SAR M5: {sar5_px:.5f}" if sar5_px > 0 else f"2%"
+                        log.info("🎯 TSAR POL %s SAR5=%.5f cloud=%s", sig.upper(), sar5_px, cloud_dir)
+                        tg(f"🎯 <b>POL SNIPER TSAR — CONFIRMAÇÃO DUPLA</b>\n"
                            f"Par: <code>POL-USDT-SWAP</code> | {dir_scout}{ichi_note}\n"
-                           f"BB M5+M15 exaustão + RSI2 flip | SL {TSAR_SL_PCT:.0f}%%\n"
-                           f"Saída: SAR M15 inversão ou lock $30")
+                           f"BB M5+M15 toque + SAR M5 inversão | SL dinâmico: {sl_note}\n"
+                           f"Saída: SAR M15 inversão")
                         fired = _fire(GOLD_POL, sig, "TSAR POL",
                                       tag="🎯 SNIPER POL", sl_pct=TSAR_SL_PCT,
-                                      force=True, qty_mult=1.0, tsar_monitor=True)
+                                      force=True, qty_mult=1.0, tsar_monitor=True,
+                                      sl_px_override=sar5_px)
                     else:
                         log.debug("[TSAR POL] sem sinal")
                 except Exception as e:
