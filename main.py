@@ -1420,6 +1420,35 @@ def _tsar_status_text() -> str:
             lines.append(f"<b>{sym}</b>: erro — {e}")
     return "\n".join(lines)
 
+def _v11_dashboard_text() -> str:
+    with _strategy_lock:
+        st = dict(_strategy_enabled)
+    def m(flag):  return "✅ ON"  if flag else "⛔ OFF"
+    def mp(mode): return "✅ ON"  if mode == "on" else ("⚠️ PAUSED" if mode == "paused" else "⛔ OFF")
+    def s(key):   return "✅"     if st.get(key, False) else "⛔"
+    ichi_pr = _priority_mode == "ichimoku"
+    anti_ig = _tsar_pol_mode == "on"
+    return (
+        "📊 <b>PAINEL DE COMANDO V11</b> 📊\n\n"
+        "🛡️ <b>MOTORES PRINCIPAIS:</b>\n"
+        f"TSAR V11 (SOL/ETH): {mp(_tsar_mode)}\n"
+        f"POL SNIPER TSAR: {mp(_tsar_pol_mode)}\n\n"
+        "⚔️ <b>MODOS DE PRICE ACTION:</b>\n"
+        f"OPÇÃO B (PA Independente): {m(_mode_opb)}\n"
+        f"OPÇÃO C (Híbrido 5×/3×): {m(_mode_opc)}\n\n"
+        "🛑 <b>FILTROS GLOBAIS DE SEGURANÇA:</b>\n"
+        f"BTC Sentinel (RSI M15): {'✅ ATIVO' if _btc_sentinel_active else '⛔ DESLIGADO'}\n"
+        f"Prioridade Ichimoku 1H: {'✅ ATIVO (Invertido)' if ichi_pr else '⛔ OFF'}\n"
+        f"Anti-Ignição (Engolfo/SAR Duplo): {'✅ ATIVO' if anti_ig else '⛔ OFF'}\n\n"
+        "🎯 <b>ESTRATÉGIAS INDIVIDUAIS (LEGACY):</b>\n"
+        f"Engolfo: {s('engolfo')} | FVG: {s('fvg')}\n"
+        f"Pin Bar: {s('pin_bar')} | OB: {s('ob')}\n"
+        f"VWAP: {s('vwap')} | Supertrend: {s('supertrend')}\n\n"
+        "⚙️ <b>GESTÃO DE RISCO:</b>\n"
+        f"Alavancagem Base: <b>{LEVERAGE}×</b>\n"
+        f"Step Trail GV5: ✅ ATIVO"
+    )
+
 def order_block_signal(df: pd.DataFrame) -> str | None:
     """ORDER BLOCK DEFENSE — ADA / XRP (1H candles).
 
@@ -3654,6 +3683,11 @@ def telegram_commands_loop() -> None:
                        "🥇 POL/SOL/XRP/ETH/BNB/ADA/DOGE — TODOS AUTOMÁTICOS\n\n"
                        f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD SL {HOLD_SL_PCT:.0f}%  |  STRICT SL {STRICT_SL_PCT:.1f}%\n"
                        f"GV5/GV6  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 5min", chat_id)
+
+                # ── /v11 — Painel de Comando Tático completo ───────────────────
+                elif cmd == "v11":
+                    try: tg(_v11_dashboard_text(), chat_id)
+                    except Exception as e: tg(f"Erro /v11: {e}", chat_id)
 
         except Exception as e:
             log.warning("tg_polling: %s", e)
