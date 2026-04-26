@@ -1665,7 +1665,11 @@ def signal_pin_bar(df: pd.DataFrame) -> str | None:
     df["rsi"]    = ta.rsi(df["close"], length=14)
     df["vol_ma"] = df["vol"].rolling(20).mean()
     bb = ta.bbands(df["close"], length=20, std=2.0)
-    df["bb_u"] = bb["BBU_20_2.0"]; df["bb_l"] = bb["BBL_20_2.0"]
+    if bb is None or bb.empty: return None
+    col_u = next((c for c in bb.columns if c.startswith("BBU_")), None)
+    col_l = next((c for c in bb.columns if c.startswith("BBL_")), None)
+    if col_u is None or col_l is None: return None
+    df["bb_u"] = bb[col_u]; df["bb_l"] = bb[col_l]
     c = df.iloc[-2]
     if pd.isna(c["ema200"]): return None
     rng  = c["high"] - c["low"]
