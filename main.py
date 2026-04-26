@@ -82,6 +82,15 @@ BB_TOL_PCT   = 0.5   # % de tolerância para "toque" na banda
 SCALP_SL_PCT  = 1.0    # SL fixo para scalp de reversão Bollinger
 TSAR_SL_PCT   = 2.0    # TSAR V11 hard stop-loss 2%
 TSAR_LOCK_USD = 30.0   # lucro que activa lock + SAR M15 trailing
+TSAR_COOLDOWN = 900    # 15 min cooldown após TSAR trade (Modo Combate)
+# GV5 — 5 graus de lock crescente: (trigger_usd, lock_usd)
+TSAR_GV5: list[tuple[float, float]] = [
+    (30.0,  25.0),   # G1: hit +$30  → piso +$25
+    (50.0,  35.0),   # G2: hit +$50  → piso +$35
+    (75.0,  55.0),   # G3: hit +$75  → piso +$55
+    (100.0, 75.0),   # G4: hit +$100 → piso +$75
+    (150.0, 110.0),  # G5: hit +$150 → piso +$110 + runner SAR M15
+]
 
 DUO_ETH    = "ETH-USDT-SWAP"
 DUO_SOL    = "SOL-USDT-SWAP"
@@ -163,6 +172,7 @@ _armadilha_mode: bool  = False   # False = off | True = Bollinger mean-reversion
 _trail_mode: str       = "gv5"   # "gv5" = Step Trail V5 | "gv6" = SAR M15 trailing
 _tsar_mode: str        = "on"    # "on" = activo por defeito | "" = off | "paused" = sem novas entradas
 _tsar_pol_mode: str    = "on"    # POL SNIPER TSAR | "on" = activo | "" = off | "paused" = sem novas entradas
+_tsar_combat_grau: int = 0       # grau GV5 activo na posição TSAR corrente (0 = nenhum)
 
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
@@ -1200,8 +1210,8 @@ def tsar_signal(inst_id: str) -> str | None:
         gain  = delta.clip(lower=0).ewm(span=2, adjust=False).mean()
         loss  = (-delta).clip(lower=0).ewm(span=2, adjust=False).mean()
         rsi2  = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
-        if back_above and rsi2 < 90: return None
-        if back_below and rsi2 > 10: return None
+        if back_above and rsi2 < 88: return None
+        if back_below and rsi2 > 12: return None
 
         c15   = df15["close"]
         mid15 = c15.rolling(BB_PERIOD).mean()
@@ -1621,13 +1631,14 @@ def _monitor(inst_id: str, pos_side: str, side: str,
              entry: float, sl_px: float, activate_px: float,
              sym: str, dir_txt: str, bal: float, qty: int,
              tag: str = "DUO ELITE", armadilha: bool = False, tsar: bool = False) -> None:
-    global _duo_in_trade, _duo_cooldown_until
+    global _duo_in_trade, _duo_cooldown_until, _tsar_combat_grau
     log.info("📡 SENTINELA [%s] %s %s | SL=%.5f | Trailing activa a %.5f | STEP TRAIL V5",
              tag, sym, dir_txt, sl_px, activate_px)
     _none_streak      = 0
     _step_trail_tier  = 0   # tier 0=nenhum activado; 1-5 = grau em vigor
     tsar_locked       = False
     tsar_peak         = 0.0
+    tsar_grau         = 0   # GV5 grau actual desta posição
     while True:
         time.sleep(20)
         try:
@@ -1691,41 +1702,56 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                 pos_sz  = int(float(pos.get("pos", qty) or qty))
 
                 if tsar:
-                    # ── TSAR V11 TRAILING ─────────────────────────────────────
-                    if not tsar_locked and upl >= TSAR_LOCK_USD:
-                        tsar_locked = True
-                        tsar_peak   = upl
+                    # ── TSAR V11 GV5 — 5 graus de lock crescente ──────────────
+                    new_grau = sum(1 for trig, _ in TSAR_GV5 if upl >= trig)
+                    if new_grau > tsar_grau and mark_px > 0 and avg_px > 0 and upl > 0:
+                        _, lock_usd = TSAR_GV5[new_grau - 1]
+                        if side == "buy":
+                            lock_px = avg_px + lock_usd * (mark_px - avg_px) / upl
+                        else:
+                            lock_px = avg_px - lock_usd * (avg_px - mark_px) / upl
                         try:
                             clear_garbage(inst_id, pos_side); time.sleep(0.5)
-                            okx_initial_sl(inst_id, pos_side, pos_sz, avg_px)
-                            tg(f"⚔️ <b>TSAR — ${TSAR_LOCK_USD:.0f} TRAVADOS</b>\n"
-                               f"Par: <code>{sym}</code> | SL → break-even\n"
-                               f"SAR M15 trailing activo.")
+                            okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
+                            tsar_grau = new_grau
+                            _tsar_combat_grau = new_grau
+                            tsar_peak = max(tsar_peak, upl)
+                            grau_bar = "🟢" * tsar_grau + "⚪" * (len(TSAR_GV5) - tsar_grau)
+                            prox_txt = (
+                                f"Próximo: +${TSAR_GV5[tsar_grau][0]:.0f} → piso +${TSAR_GV5[tsar_grau][1]:.0f}"
+                                if tsar_grau < len(TSAR_GV5) else "🏆 GRAU MÁXIMO — runner SAR M15 activo"
+                            )
+                            tg(f"⚔️ <b>TSAR GV5 GRAU {tsar_grau}/5</b> {grau_bar}\n"
+                               f"Par: <code>{sym}</code> | P&L: <b>${upl:+.2f}</b>\n"
+                               f"SL travado em +${lock_usd:.0f} ({lock_px:.5f})\n"
+                               f"{prox_txt}")
                         except Exception as e:
-                            log.warning("TSAR lock: %s", e)
+                            log.warning("TSAR GV5 upgrade G%d: %s", new_grau, e)
 
-                    if tsar_locked:
-                        tsar_peak   = max(tsar_peak, upl)
-                        sar15       = _get_sar_m15_px(inst_id)
-                        h1_bull     = _h1_trend_bull(inst_id)
-                        with_trend  = (side == "buy" and h1_bull) or (side == "sell" and not h1_bull)
+                    if tsar_grau >= 1:
+                        tsar_peak  = max(tsar_peak, upl)
+                        sar15      = _get_sar_m15_px(inst_id)
+                        h1_bull    = _h1_trend_bull(inst_id)
+                        with_trend = (side == "buy" and h1_bull) or (side == "sell" and not h1_bull)
 
                         if sar15 > 0 and mark_px > 0:
                             sar_inv = ((side == "buy"  and sar15 > mark_px) or
                                        (side == "sell" and sar15 < mark_px))
                             if sar_inv:
-                                log.info("⚔️ TSAR SAR M15 inverteu %s — fechando", sym)
+                                log.info("⚔️ TSAR GV5 G%d SAR M15 inverteu %s — fechando",
+                                         tsar_grau, sym)
                                 try:
                                     cancel_all_open_orders(inst_id); time.sleep(0.5)
                                     okx_close_market(inst_id, pos_side, pos_sz)
-                                    tg(f"⚔️ <b>TSAR — SAR M15 INVERTEU</b>\n"
+                                    tg(f"⚔️ <b>TSAR — SAR M15 INVERTEU G{tsar_grau}/5</b>\n"
                                        f"Par: <code>{sym}</code> | {dir_txt}\n"
                                        f"P&L: <b>${upl:+.2f}</b> USDT | Pico: ${tsar_peak:+.2f}")
+                                    _tsar_combat_grau = 0
                                     with _duo_lock:
                                         _duo_in_trade       = False
-                                        _duo_cooldown_until = time.time() + DUO_COOLDOWN
+                                        _duo_cooldown_until = time.time() + TSAR_COOLDOWN
                                 except Exception as e:
-                                    log.error("TSAR SAR close: %s", e)
+                                    log.error("TSAR GV5 SAR close: %s", e)
                                 return
                             else:
                                 if ((side == "buy"  and sar15 > sl_px and sar15 < mark_px) or
@@ -1733,39 +1759,40 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                                     try:
                                         clear_garbage(inst_id, pos_side); time.sleep(0.5)
                                         okx_initial_sl(inst_id, pos_side, pos_sz, sar15)
-                                        log.info("⚔️ TSAR ratchet %s %.5f→%.5f", sym, sl_px, sar15)
+                                        log.info("⚔️ TSAR GV5 ratchet %s %.5f→%.5f", sym, sl_px, sar15)
                                         sl_px = sar15
                                     except Exception as e:
-                                        log.warning("TSAR ratchet: %s", e)
-                                # Contra H1: fecha se lucro caiu para 50% do pico
-                                if not with_trend and tsar_peak >= TSAR_LOCK_USD and upl < tsar_peak * 0.5:
-                                    log.info("⚔️ TSAR contra H1 — pico $%.2f lucro $%.2f — saída agressiva %s",
-                                             tsar_peak, upl, sym)
+                                        log.warning("TSAR GV5 ratchet: %s", e)
+                                if not with_trend and upl < tsar_peak * 0.5:
+                                    log.info("⚔️ TSAR GV5 G%d contra H1 — pico $%.2f lucro $%.2f %s",
+                                             tsar_grau, tsar_peak, upl, sym)
                                     try:
                                         cancel_all_open_orders(inst_id); time.sleep(0.5)
                                         okx_close_market(inst_id, pos_side, pos_sz)
-                                        tg(f"⚔️ <b>TSAR — SAÍDA AGRESSIVA (contra H1)</b>\n"
+                                        tg(f"⚔️ <b>TSAR — SAÍDA AGRESSIVA G{tsar_grau} (contra H1)</b>\n"
                                            f"Par: <code>{sym}</code> | P&L: ${upl:+.2f} "
                                            f"(pico ${tsar_peak:+.2f})")
+                                        _tsar_combat_grau = 0
                                         with _duo_lock:
                                             _duo_in_trade       = False
-                                            _duo_cooldown_until = time.time() + DUO_COOLDOWN
+                                            _duo_cooldown_until = time.time() + TSAR_COOLDOWN
                                     except Exception as e:
-                                        log.error("TSAR aggressive close: %s", e)
+                                        log.error("TSAR GV5 aggressive close: %s", e)
                                     return
 
                         if mark_px > 0 and _h1_band_opposite(inst_id, side):
-                            log.info("⚔️ TSAR alvo H1 %s", sym)
+                            log.info("⚔️ TSAR GV5 alvo H1 G%d %s", tsar_grau, sym)
                             try:
                                 cancel_all_open_orders(inst_id); time.sleep(0.5)
                                 okx_close_market(inst_id, pos_side, pos_sz)
-                                tg(f"⚔️ <b>TSAR — ALVO H1 ATINGIDO 🏆</b>\n"
+                                tg(f"⚔️ <b>TSAR — ALVO H1 ATINGIDO G{tsar_grau}/5 🏆</b>\n"
                                    f"Par: <code>{sym}</code> | P&L: <b>${upl:+.2f}</b> USDT")
+                                _tsar_combat_grau = 0
                                 with _duo_lock:
                                     _duo_in_trade       = False
-                                    _duo_cooldown_until = time.time() + DUO_COOLDOWN
+                                    _duo_cooldown_until = time.time() + TSAR_COOLDOWN
                             except Exception as e:
-                                log.error("TSAR H1 close: %s", e)
+                                log.error("TSAR GV5 H1 close: %s", e)
                             return
 
                 elif armadilha:
@@ -2964,7 +2991,7 @@ _GO_MAP = {
 }
 
 def telegram_commands_loop() -> None:
-    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode
+    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode, _tsar_combat_grau
     if not TELEGRAM_TOKEN:
         log.warning("TELEGRAM_TOKEN não configurado — comandos desativados.")
         return
@@ -3211,14 +3238,14 @@ def telegram_commands_loop() -> None:
                         _tsar_mode = "on"
                         with _pending_lock: _pending_signals.clear()
                         _save_state(_bot_authorized)
-                        tg("⚔️ <b>TSAR V11 ACTIVADO</b>\n"
+                        tg("⚔️ <b>TSAR V11 MODO COMBATE ACTIVADO</b>\n"
                            "─────────────────────────────\n"
-                           "Pares: <b>BNB · SOL · ETH</b>\n"
-                           "• Regra da Expulsão: BB M5+M15 + RSI2 exaustão + SAR M5 flip\n"
+                           "Pares: <b>ETH · SOL</b>\n"
+                           "• Regra da Expulsão: BB M5+M15 + RSI2 ≥88/≤12 + SAR M5 flip\n"
                            "• BTC RSI M15 extremo (&lt;30 ou &gt;70) → +50%% size\n"
-                           "• SL hard: <b>2%%</b> | Lock: <b>$30</b> → SAR M15 trailing\n"
-                           "• H1 favor → trailing lento | H1 contra → saída agressiva\n"
-                           "• FVG automaticamente pausada\n"
+                           "• SL hard: <b>2%%</b> | GV5: G1$30→G2$50→G3$75→G4$100→G5$150\n"
+                           "• H1 favor → trailing lento | H1 contra → saída agressiva 50%%\n"
+                           "• FVG automaticamente pausada | Cooldown: 15 min\n"
                            "Usa <code>/tsar off</code> para desligar.", chat_id)
                     elif args[0] == "pause":
                         _tsar_mode = "paused"
@@ -3234,6 +3261,36 @@ def telegram_commands_loop() -> None:
                         except Exception as e: tg(f"Erro /tsar status: {e}", chat_id)
                     else:
                         tg("❌ Opções: <code>/tsar on | pause | off | status</code>", chat_id)
+
+                # ── /combat — alias rápido para /tsar on|off ────────────────────
+                elif cmd == "combat":
+                    if not args or args[0] in ("on", "start"):
+                        _tsar_mode = "on"
+                        with _pending_lock: _pending_signals.clear()
+                        _save_state(_bot_authorized)
+                        tg("⚔️ <b>MODO COMBATE ACTIVADO</b>\n"
+                           "ETH · SOL | GV5 | RSI2 ≥88/≤12 | SL 2%% | Cooldown 15min", chat_id)
+                    elif args[0] in ("off", "stop"):
+                        _tsar_mode = ""
+                        _save_state(_bot_authorized)
+                        tg("🔓 <b>MODO COMBATE DESLIGADO</b>", chat_id)
+                    else:
+                        tg("Uso: <code>/combat on | off</code>", chat_id)
+
+                # ── /grau — estado GV5 da posição TSAR activa ───────────────────
+                elif cmd == "grau":
+                    g = _tsar_combat_grau
+                    grau_bar = "🟢" * g + "⚪" * (len(TSAR_GV5) - g)
+                    if g == 0:
+                        status_txt = "Sem grau activo (posição ainda não atingiu G1 ou sem posição)"
+                    else:
+                        trig, lock = TSAR_GV5[g - 1]
+                        nxt = (f"Próximo G{g+1}: +${TSAR_GV5[g][0]:.0f}"
+                               if g < len(TSAR_GV5) else "🏆 GRAU MÁXIMO")
+                        status_txt = f"G{g}/5 travado em +${lock:.0f} | {nxt}"
+                    tg(f"⚔️ <b>TSAR GV5</b> {grau_bar}\n{status_txt}\n"
+                       f"Graus: G1$30→$25 | G2$50→$35 | G3$75→$55 | G4$100→$75 | G5$150→$110",
+                       chat_id)
 
                 # ── /tsarpol — POL SNIPER TSAR ─────────────────────────────────
                 elif cmd == "tsarpol":
@@ -3677,11 +3734,11 @@ def duo_elite_loop() -> None:
                 except Exception as e:
                     log.error("[DOGE/OB] %s", e)
 
-            # ╔══════════════ TSAR V11 — EXPULSION PROTOCOL ══════════════════╗
-            # ── BNB · SOL · ETH — Regra da Expulsão (BB M5+M15 + RSI2 + SAR) ─
+            # ╔══════════════ TSAR V11 MODO COMBATE — EXPULSION PROTOCOL ═════╗
+            # ── ETH · SOL — Regra da Expulsão (BB M5+M15 + RSI2 88/12 + SAR) ─
             if not fired and _tsar_mode == "on":
                 for _ti, _ts, _tt in [
-                    (FVG_BNB, "BNB", "⚔️ TSAR"), (DUO_SOL, "SOL", "⚔️ TSAR"), (DUO_ETH, "ETH", "⚔️ TSAR")
+                    (DUO_ETH, "ETH", "⚔️ TSAR"), (DUO_SOL, "SOL", "⚔️ TSAR")
                 ]:
                     if fired: break
                     try:
