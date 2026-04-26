@@ -184,6 +184,8 @@ MONTHLY_GOAL_USD = 600.0
 # ── Panic pause ────────────────────────────────────────────────────────────
 _panic_until: float = 0.0
 _btc_sentinel_active: bool = True
+_mode_opb: bool = False   # Opção B — PA independentes (ETH/SOL/BNB/XRP/POL)
+_mode_opc: bool = False   # Opção C — híbrido TSAR+PA: 5× se TSAR confirma, 3× só PA
 
 # ── Estratégias habilitadas — /pausar /activar individuais ───────────────────
 _STRATEGY_KEYS = ("ichimoku", "supertrend", "rsidiv", "vwap", "engolfo", "ob", "fvg")
@@ -1602,6 +1604,133 @@ def fvg_signal(df: pd.DataFrame, inst_id: str) -> str | None:
     return signal_out
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PRICE ACTION — 5 operacionais autónomos (OpB / OpC)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def signal_engolfo(df: pd.DataFrame) -> str | None:
+    if len(df) < 30: return None
+    df = df.copy()
+    df["ema200"] = ta.ema(df["close"], length=200)
+    df["rsi"]    = ta.rsi(df["close"], length=14)
+    df["vol_ma"] = df["vol"].rolling(20).mean()
+    c, p = df.iloc[-2], df.iloc[-3]
+    if pd.isna(c["ema200"]): return None
+    body = abs(c["close"] - c["open"])
+    if body < c["close"] * 0.0025: return None
+    if c["vol"] < c["vol_ma"] * 1.5: return None
+    pt = max(p["open"], p["close"]); pb = min(p["open"], p["close"])
+    ct = max(c["open"], c["close"]); cb = min(c["open"], c["close"])
+    bull = (p["close"] < p["open"] and c["close"] > c["open"]
+            and cb <= pb and ct >= pt and c["close"] > c["ema200"]
+            and 40 <= c["rsi"] <= 65)
+    bear = (p["close"] > p["open"] and c["close"] < c["open"]
+            and cb <= pb and ct >= pt and c["close"] < c["ema200"]
+            and 35 <= c["rsi"] <= 60)
+    if bull: return "buy"
+    if bear: return "sell"
+    return None
+
+def signal_pin_bar(df: pd.DataFrame) -> str | None:
+    if len(df) < 30: return None
+    df = df.copy()
+    df["ema200"] = ta.ema(df["close"], length=200)
+    df["rsi"]    = ta.rsi(df["close"], length=14)
+    df["vol_ma"] = df["vol"].rolling(20).mean()
+    bb = ta.bbands(df["close"], length=20, std=2.0)
+    df["bb_u"] = bb["BBU_20_2.0"]; df["bb_l"] = bb["BBL_20_2.0"]
+    c = df.iloc[-2]
+    if pd.isna(c["ema200"]): return None
+    rng  = c["high"] - c["low"]
+    if rng == 0: return None
+    body = abs(c["close"] - c["open"])
+    lw   = min(c["open"], c["close"]) - c["low"]
+    uw   = c["high"] - max(c["open"], c["close"])
+    vol_ok = c["vol"] >= c["vol_ma"] * 1.3
+    bull = (lw >= 2*body and uw < 0.5*body
+            and c["close"] > c["ema200"]
+            and c["low"] <= c["bb_l"] * 1.002
+            and 25 <= c["rsi"] <= 50 and vol_ok)
+    bear = (uw >= 2*body and lw < 0.5*body
+            and c["close"] < c["ema200"]
+            and c["high"] >= c["bb_u"] * 0.998
+            and 50 <= c["rsi"] <= 75 and vol_ok)
+    if bull: return "buy"
+    if bear: return "sell"
+    return None
+
+def signal_inside_bar(df: pd.DataFrame) -> str | None:
+    if len(df) < 30: return None
+    df = df.copy()
+    df["ema200"] = ta.ema(df["close"], length=200)
+    df["rsi"]    = ta.rsi(df["close"], length=14)
+    df["vol_ma"] = df["vol"].rolling(20).mean()
+    c, p, m = df.iloc[-2], df.iloc[-3], df.iloc[-4]
+    if pd.isna(c["ema200"]): return None
+    inside = p["high"] <= m["high"] and p["low"] >= m["low"]
+    if not inside: return None
+    vol_ok = c["vol"] >= c["vol_ma"] * 1.4
+    bull = (c["close"] > m["high"] and c["close"] > c["ema200"]
+            and 45 <= c["rsi"] <= 65 and vol_ok)
+    bear = (c["close"] < m["low"] and c["close"] < c["ema200"]
+            and 35 <= c["rsi"] <= 55 and vol_ok)
+    if bull: return "buy"
+    if bear: return "sell"
+    return None
+
+def signal_ema21_rejection(df: pd.DataFrame) -> str | None:
+    if len(df) < 30: return None
+    df = df.copy()
+    df["ema21"]  = ta.ema(df["close"], length=21)
+    df["ema200"] = ta.ema(df["close"], length=200)
+    df["rsi"]    = ta.rsi(df["close"], length=14)
+    c, p = df.iloc[-2], df.iloc[-3]
+    if pd.isna(c["ema200"]): return None
+    touched = (min(c["low"], p["low"])   <= c["ema21"] * 1.002
+               and max(c["high"], p["high"]) >= c["ema21"] * 0.998)
+    if not touched: return None
+    rng = c["high"] - c["low"]
+    if rng == 0: return None
+    pavio = (c["low"] - min(c["open"], c["close"])) / rng
+    bull = (c["close"] > c["ema21"] and c["close"] > c["ema200"]
+            and pavio >= 0.35 and 40 <= c["rsi"] <= 60)
+    bear = (c["close"] < c["ema21"] and c["close"] < c["ema200"]
+            and pavio >= 0.35 and 40 <= c["rsi"] <= 60)
+    if bull: return "buy"
+    if bear: return "sell"
+    return None
+
+def signal_three_soldiers(df: pd.DataFrame) -> str | None:
+    if len(df) < 30: return None
+    df = df.copy()
+    df["ema200"] = ta.ema(df["close"], length=200)
+    df["rsi"]    = ta.rsi(df["close"], length=14)
+    df["vol_ma"] = df["vol"].rolling(20).mean()
+    v1, v2, v3 = df.iloc[-4], df.iloc[-3], df.iloc[-2]
+    if pd.isna(v3["ema200"]): return None
+    vol_cresce = v2["vol"] > v1["vol"] and v3["vol"] > v2["vol"]
+    soldiers = (v1["close"] > v1["open"] and v2["close"] > v2["open"]
+                and v3["close"] > v3["open"]
+                and v2["close"] > v1["close"] and v3["close"] > v2["close"]
+                and v3["close"] > v3["ema200"] and 50 <= v3["rsi"] <= 72
+                and vol_cresce)
+    crows = (v1["close"] < v1["open"] and v2["close"] < v2["open"]
+             and v3["close"] < v3["open"]
+             and v2["close"] < v1["close"] and v3["close"] < v2["close"]
+             and v3["close"] < v3["ema200"] and 28 <= v3["rsi"] <= 50
+             and vol_cresce)
+    if soldiers: return "buy"
+    if crows: return "sell"
+    return None
+
+PA_SIGNALS: dict[str, callable] = {
+    "engolfo":    signal_engolfo,
+    "pin_bar":    signal_pin_bar,
+    "inside_bar": signal_inside_bar,
+    "ema21":      signal_ema21_rejection,
+    "3soldiers":  signal_three_soldiers,
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MONITOR — aguarda fecho de posição em thread separada
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2991,7 +3120,7 @@ _GO_MAP = {
 }
 
 def telegram_commands_loop() -> None:
-    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode, _tsar_combat_grau
+    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode, _tsar_combat_grau, _mode_opb, _mode_opc
     if not TELEGRAM_TOKEN:
         log.warning("TELEGRAM_TOKEN não configurado — comandos desativados.")
         return
@@ -3128,10 +3257,37 @@ def telegram_commands_loop() -> None:
                     lines.append(f"{tsar_icon} — ⚔️ BNB/SOL/ETH  TSAR V11 (Expulsão)")
                     tpol_icon = "✅ ON " if _tsar_pol_mode == "on" else ("⏸ PAU" if _tsar_pol_mode == "paused" else "⛔ OFF")
                     lines.append(f"{tpol_icon} — 🎯 POL  SNIPER TSAR (Inversão Total)")
+                    opb_icon = "✅ ON " if _mode_opb else "⛔ OFF"
+                    opc_icon = "✅ ON " if _mode_opc else "⛔ OFF"
+                    lines.append(f"{opb_icon} — 📐 ETH/SOL/BNB/XRP/POL  OPÇÃO B (PA Indep.)")
+                    lines.append(f"{opc_icon} — 🔀 ETH/SOL  OPÇÃO C (Híbrido TSAR+PA)")
                     lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>\n"
                                  "<i>/tsar on | pause | off | status</i>\n"
-                                 "<i>/tsarpol on | pause | off | status</i>")
+                                 "<i>/tsarpol on | pause | off | status</i>\n"
+                                 "<i>/opb — toggle OpB | /opc — toggle OpC</i>")
                     tg("\n".join(lines), chat_id)
+
+                # ── /opb — Opção B PA Independentes ON/OFF ───────────────────
+                elif cmd == "opb":
+                    _mode_opb = not _mode_opb
+                    estado = "✅ LIGADA" if _mode_opb else "⭕ DESLIGADA"
+                    tg(f"📐 <b>Opção B — PA Independentes: {estado}</b>\n"
+                       f"5 operacionais autónomos em ETH/SOL/BNB/XRP/POL\n"
+                       f"Engolfo | Pin Bar | Inside Bar | EMA21 | 3 Soldiers\n"
+                       f"{'⚠️ Mais trades — win rate ~72%' if _mode_opb else ''}",
+                       chat_id)
+                    log.info("Opção B: %s", estado)
+
+                # ── /opc — Opção C Híbrido TSAR+PA ON/OFF ────────────────────
+                elif cmd == "opc":
+                    _mode_opc = not _mode_opc
+                    estado = "✅ LIGADA" if _mode_opc else "⭕ DESLIGADA"
+                    tg(f"🔀 <b>Opção C — Híbrido: {estado}</b>\n"
+                       f"TSAR + PA → 5× | Só PA → 3×\n"
+                       f"Pares: ETH e SOL\n"
+                       f"{'⚠️ Equilíbrio entre frequência e precisão' if _mode_opc else ''}",
+                       chat_id)
+                    log.info("Opção C: %s", estado)
 
                 # ── /sentinel [on|off] — toggle ou força estado BTC Sentinel ───
                 elif cmd == "sentinel":
@@ -3487,6 +3643,9 @@ def telegram_commands_loop() -> None:
                        "<b>Acção manual:</b>\n"
                        "/gv5 — Step Trail V5 | /gv6 — SAR M15 trailing\n"
                        "/tsar on|pause|off|status — TSAR V11 Expulsão\n"
+                       "/combat on|off — alias rápido /tsar | /grau — estado GV5\n"
+                       "/opb — 📐 Opção B PA Independentes ON/OFF\n"
+                       "/opc — 🔀 Opção C Híbrido TSAR+PA ON/OFF\n"
                        "/clab — 🧹 Cancela TODAS as ordens abertas na OKX\n"
                        "/go[coin] — Confirma sinal pendente (120s)\n"
                        "  /goeth  /gosol  /goxrp  /goada  /godoge  /gobnb\n"
@@ -3811,6 +3970,62 @@ def duo_elite_loop() -> None:
                 except Exception as e:
                     log.error("[ETH/FVG] %s", e)
             # ╚═══════════════════════════════════════════════════════════════╝
+
+            # ── OPÇÃO B — PA Independentes ──────────────────────────────────
+            if _mode_opb and not fired:
+                with _duo_lock:
+                    em_trade = _duo_in_trade
+                if not em_trade:
+                    for par, inst_id, bar in [
+                        ("ETH", DUO_ETH,    "15m"),
+                        ("SOL", DUO_SOL,    "15m"),
+                        ("BNB", FVG_BNB,    "15m"),
+                        ("XRP", SHIELD_XRP, "15m"),
+                        ("POL", GOLD_POL,   "1H"),
+                    ]:
+                        try:
+                            df = okx_candles(inst_id, bar=bar, limit=300)
+                            for pa_name, pa_fn in PA_SIGNALS.items():
+                                sig = pa_fn(df)
+                                if sig:
+                                    log.info("[OpB] %s %s → %s", pa_name, par, sig)
+                                    tg(f"📐 <b>OpB — {pa_name.upper()} {par}</b>\n"
+                                       f"Sinal: {'📈 LONG' if sig == 'buy' else '📉 SHORT'} | {bar}")
+                                    fired = _fire(inst_id, sig,
+                                                  f"OpB {pa_name}", tag=f"📐 OpB {par}")
+                                    if fired: break
+                            if fired: break
+                        except Exception as e:
+                            log.error("[OpB] %s: %s", par, e)
+
+            # ── OPÇÃO C — Híbrido (TSAR+PA 5× / só PA 3×) ──────────────────
+            if _mode_opc and not fired:
+                with _duo_lock:
+                    em_trade = _duo_in_trade
+                if not em_trade:
+                    for par, inst_id in [("ETH", DUO_ETH), ("SOL", DUO_SOL)]:
+                        try:
+                            df = okx_candles(inst_id, bar="15m", limit=300)
+                            for pa_name, pa_fn in PA_SIGNALS.items():
+                                sig = pa_fn(df)
+                                if not sig: continue
+                                tsar_confirma = tsar_signal(inst_id) == sig
+                                lev_label = "5×" if tsar_confirma else "3×"
+                                lev_real  = LEVERAGE if tsar_confirma else 3
+                                log.info("[OpC] %s %s %s tsar=%s lev=%s",
+                                         pa_name, par, sig, tsar_confirma, lev_real)
+                                tg(f"🔀 <b>OpC — {pa_name.upper()} {par}</b>\n"
+                                   f"Sinal: {'📈 LONG' if sig == 'buy' else '📉 SHORT'}\n"
+                                   f"{'✅ TSAR confirma — ' if tsar_confirma else '⚡ Só PA — '}{lev_label}")
+                                _lev_orig = LEVERAGE
+                                globals()["LEVERAGE"] = lev_real
+                                fired = _fire(inst_id, sig,
+                                              f"OpC {pa_name}", tag=f"🔀 OpC {par}")
+                                globals()["LEVERAGE"] = _lev_orig
+                                if fired: break
+                            if fired: break
+                        except Exception as e:
+                            log.error("[OpC] %s: %s", par, e)
 
         except Exception as e:
             log.error("loop: %s", e)
