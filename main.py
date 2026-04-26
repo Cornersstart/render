@@ -6,7 +6,6 @@ Doutrina : ONE TARGET, ONE KILL  |  STEP TRAIL V5 = LAW
 🏆 GOLDEN DOCTRINE (backtest 103 dias — actualizada Abr/2026):
   🥇 POL — E09 ICHIMOKU 1H V2         (5 filtros anti-falso, reforçado Abr/2026) HOLD
   🌊 SOL — E06 SUPERTREND 15m         (95.0% hit, +$515 líq.)    HOLD
-  🎯 XRP — E07 RSI DIV + VWAP 15m     (PF 2.38, alta convicção)  STRICT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🆕 FVG EXPANSION SQUAD (backtest 90 dias — adicionado V9):
   🔷 SOL — E10 FAIR VALUE GAP 15m     (70.6% hit, ROI +70.4%)    HOLD
@@ -17,10 +16,9 @@ LEGACY SQUAD (mantido como rede):
   💧 ETH — VWAP KISS M15                                          HOLD
   🔥 SOL — ENGOLFO M15  (extra trigger)                           HOLD
   🛡️ ADA — ORDER BLOCK 1H                                         STRICT
-  🛡️ XRP — ORDER BLOCK 1H                                         STRICT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HOLD pairs (POL/ETH/SOL/BNB): sem SL apertado, só circuit breaker -4%
-STRICT pairs (ADA/XRP/DOGE): SL fixo 1.5% — backtest mostra ruína se segurar
+STRICT pairs (ADA/DOGE): SL fixo 1.5% — backtest mostra ruína se segurar
 GLOBAL CIRCUIT BREAKER: -4% drawdown = fecho imediato (protege banca $900)
 Trailing +0.8% cb 1% | 5× Isolated ALL-IN | OKX Perpetual SWAP (hedge mode)
 FVG: gap entre high[i-2] e low[i] (bullish) ou low[i-2] e high[i] (bearish)
@@ -95,13 +93,12 @@ TSAR_GV5: list[tuple[float, float]] = [
 DUO_ETH    = "ETH-USDT-SWAP"
 DUO_SOL    = "SOL-USDT-SWAP"
 SHIELD_ADA = "ADA-USDT-SWAP"
-SHIELD_XRP = "XRP-USDT-SWAP"
 GOLD_POL   = "POL-USDT-SWAP"      # 🥇 Golden pair — Ichimoku 1H exclusivo
 GOLD_DOGE  = "DOGE-USDT-SWAP"     # incluído na lista STRICT (regra de hold)
 FVG_BNB    = "BNB-USDT-SWAP"      # 🆕 V9 — FVG expansion squad
-ALL_SYMS   = [DUO_ETH, DUO_SOL, SHIELD_ADA, SHIELD_XRP, GOLD_POL, GOLD_DOGE, FVG_BNB]
+ALL_SYMS   = [DUO_ETH, DUO_SOL, SHIELD_ADA, GOLD_POL, GOLD_DOGE, FVG_BNB]
 
-# ── ORDER BLOCK DEFENSE (ADA / XRP — 1H) ──────────────────────────────────────
+# ── ORDER BLOCK DEFENSE (ADA — 1H) ───────────────────────────────────────────
 OB_LOOKBACK    = 20    # velas 1H para procurar blocos de ordem
 OB_VOL_MULT    = 2.0   # volume do expansion candle ≥ 2× média
 OB_BODY_MULT   = 1.5   # corpo do expansion candle ≥ 1.5× média
@@ -122,7 +119,7 @@ STEP_TRAIL_LEVELS: list[tuple[float, float]] = [
 # GOLDEN RECOVERY DOCTRINE — regras de hold por par (Abr/2026)
 # ══════════════════════════════════════════════════════════════════════════════
 HOLD_PAIRS    = {GOLD_POL, DUO_ETH, DUO_SOL, FVG_BNB}    # sem SL apertado
-STRICT_PAIRS  = {SHIELD_ADA, SHIELD_XRP, GOLD_DOGE}      # SL fixo 1.5%
+STRICT_PAIRS  = {SHIELD_ADA, GOLD_DOGE}                  # SL fixo 1.5%
 STRICT_SL_PCT = 1.5
 # HOLD: SL na corretora é REDE DE SEGURANÇA (caso o bot/monitor caia).
 # O controlo primário é o CIRCUIT_BREAKER no monitor (4.0%) — dispara primeiro.
@@ -517,6 +514,24 @@ def okx_close_market(inst_id: str, pos_side: str, sz: int) -> dict:
     item = d["data"][0]
     if item.get("sCode") not in ("0", 0):
         raise RuntimeError(f"close_market {inst_id}: sCode={item.get('sCode')} {item.get('sMsg')}")
+    return d
+
+def okx_close_limit(inst_id: str, pos_side: str, sz: int, limit_px: float) -> dict:
+    """Fecha posição via ordem limit (modo maker — sem taker fee)."""
+    if not _has_creds(): raise RuntimeError("Sem credenciais OKX.")
+    path = "/api/v5/trade/order"
+    close_side = "sell" if pos_side == "long" else "buy"
+    body = json.dumps({"instId": inst_id, "tdMode": "isolated",
+                       "side": close_side, "posSide": pos_side,
+                       "ordType": "limit", "sz": str(sz), "px": f"{limit_px:.6f}"})
+    r = requests.post(f"https://www.okx.com{path}",
+                      headers=_headers("POST", path, body), data=body, timeout=10)
+    d = r.json()
+    if d.get("code") != "0":
+        raise RuntimeError(f"close_limit {inst_id}: {d.get('msg')}")
+    item = (d.get("data") or [{}])[0]
+    if str(item.get("sCode", "0")) not in ("0",):
+        raise RuntimeError(f"close_limit {inst_id}: sCode={item.get('sCode')} {item.get('sMsg')}")
     return d
 
 # ── OKX — cancela todos os algos pendentes de um instrumento/posSide ──────────
@@ -1791,7 +1806,8 @@ def _get_real_exit(inst_id: str) -> tuple[float, float]:
 def _monitor(inst_id: str, pos_side: str, side: str,
              entry: float, sl_px: float, activate_px: float,
              sym: str, dir_txt: str, bal: float, qty: int,
-             tag: str = "DUO ELITE", armadilha: bool = False, tsar: bool = False) -> None:
+             tag: str = "DUO ELITE", armadilha: bool = False, tsar: bool = False,
+             min_trail_pct: float = 0.0) -> None:
     global _duo_in_trade, _duo_cooldown_until, _tsar_combat_grau
     log.info("📡 SENTINELA [%s] %s %s | SL=%.5f | Trailing activa a %.5f | STEP TRAIL V5",
              tag, sym, dir_txt, sl_px, activate_px)
@@ -2007,7 +2023,11 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                     # ── STEP TRAIL V5 (modo normal) ───────────────────────────
                     if _step_trail_tier < len(STEP_TRAIL_LEVELS) and mark_px > 0 and avg_px > 0:
                         trigger_usd, lock_usd = STEP_TRAIL_LEVELS[_step_trail_tier]
-                        if upl >= trigger_usd:
+                        _pct_g = (((mark_px - avg_px) / avg_px * 100) if side == "buy"
+                                  else ((avg_px - mark_px) / avg_px * 100)) if avg_px > 0 else 0.0
+                        if min_trail_pct > 0.0 and _pct_g < min_trail_pct:
+                            pass  # aguarda lucro mínimo antes de activar step trail
+                        elif upl >= trigger_usd:
                             if side == "buy":
                                 price_move = mark_px - avg_px
                                 lock_px    = avg_px + lock_usd * (price_move / upl)
@@ -2194,7 +2214,8 @@ def get_btc_sentiment() -> tuple[str, bool, float, float, float]:
 def _fire(inst_id: str, side: str, signal_name: str,
           tag: str = "DUO ELITE", sl_pct: float | None = None,
           force: bool = False, qty_mult: float = 1.0,
-          tsar_monitor: bool = False, sl_px_override: float = 0.0) -> bool:
+          tsar_monitor: bool = False, sl_px_override: float = 0.0,
+          min_trail_pct: float = 0.0) -> bool:
     """Executa ordem market + SL inicial + Step Trail V5.
 
     Filtros antes da ordem (ignorados se force=True):
@@ -2207,7 +2228,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
 
     SL routing (sobrepõe sl_pct passado, excepto se for explícito):
       - HOLD pairs (POL/ETH/SOL): SL = HOLD_SL_PCT (5%) → circuit breaker
-      - STRICT pairs (ADA/XRP/DOGE): SL = STRICT_SL_PCT (1.5%)
+      - STRICT pairs (ADA/DOGE): SL = STRICT_SL_PCT (1.5%)
       - Outros: usa sl_pct passado ou DUO_SL_PCT
     """
     global _duo_in_trade, _lockdown_until, _btc_sentinel_active
@@ -2373,7 +2394,8 @@ def _fire(inst_id: str, side: str, signal_name: str,
     threading.Thread(target=_monitor,
         args=(inst_id, ps, side, avg, sl_px, activate_px, sym, dir_txt, bal, qty),
         kwargs={"tag": tag, "armadilha": (_armadilha_mode or _trail_mode == "gv6"),
-                "tsar": (_tsar_mode == "on" or tsar_monitor)},
+                "tsar": (_tsar_mode == "on" or tsar_monitor),
+                "min_trail_pct": min_trail_pct},
         daemon=True, name=f"mon_{sym}").start()
     return True
 
@@ -2446,7 +2468,6 @@ def cmd_radar() -> str:
     checks = [
         (GOLD_POL,   "POL",  "1H",  "15m", "🥇 ICHIMOKU",     ichimoku_signal),
         (DUO_SOL,    "SOL",  "15m", "15m", "🌊 SUPERTREND",    supertrend_signal),
-        (SHIELD_XRP, "XRP",  "15m", "15m", "🎯 RSI DIV",       rsi_div_vwap_signal),
         (DUO_ETH,    "ETH",  "15m", "15m", "💧 VWAP KISS",     vwap_kiss_signal),
         (FVG_BNB,    "BNB",  "15m", "15m", "🔷 FVG",           lambda df: fvg_signal(df, FVG_BNB)),
         (SHIELD_ADA, "ADA",  "1H",  "1H",  "🛡️ ORDER BLOCK",  order_block_signal),
@@ -2684,7 +2705,7 @@ def cmd_gv5() -> str:
 # ── /force [coin] — Ordem manual ignorando filtros (RSI direccional) ──────────
 _FORCE_MAP = {
     "pol": GOLD_POL, "eth": DUO_ETH, "sol": DUO_SOL,
-    "xrp": SHIELD_XRP, "ada": SHIELD_ADA, "doge": GOLD_DOGE, "bnb": FVG_BNB,
+    "ada": SHIELD_ADA, "doge": GOLD_DOGE, "bnb": FVG_BNB,
 }
 
 def cmd_force(coin: str) -> str:
@@ -2944,7 +2965,6 @@ def cmd_backtest() -> str:
     CONFIGS = [
         ("🥇 POL Ichimoku 1H",    GOLD_POL,   "1H",  _bt_ichimoku, 5.0, 4.0),
         ("🔷 FVG ETH 15m",        DUO_ETH,    "15m", _bt_fvg,      5.0, 4.0),
-        ("🎯 XRP RSI Div 15m",    SHIELD_XRP, "15m", _bt_rsi_div,  1.5, 4.0),
         ("🔷 FVG SOL 15m",        DUO_SOL,    "15m", _bt_fvg,      5.0, 4.0),
         ("🔷 FVG BNB 15m",        FVG_BNB,    "15m", _bt_fvg,      5.0, 4.0),
     ]
@@ -3131,7 +3151,6 @@ _tg_offset = 0
 _GO_MAP = {
     "goeth":  DUO_ETH,
     "gosol":  DUO_SOL,
-    "goxrp":  SHIELD_XRP,
     "goada":  SHIELD_ADA,
     "godoge": GOLD_DOGE,
     "gobnb":  FVG_BNB,
@@ -3261,10 +3280,10 @@ def telegram_commands_loop() -> None:
                     labels = {
                         "ichimoku":   "🥇 POL  ICHIMOKU 1H",
                         "supertrend": "🌊 SOL  SUPERTREND 15m",
-                        "rsidiv":     "🎯 XRP  RSI DIV + VWAP 15m",
+                        "rsidiv":     "🎯 RSI DIV + VWAP 15m",
                         "vwap":       "💧 ETH  VWAP KISS 15m",
                         "engolfo":    "🔥 SOL  ENGOLFO 15m",
-                        "ob":         "🛡️ ADA/XRP/DOGE  ORDER BLOCK 1H",
+                        "ob":         "🛡️ ADA/DOGE  ORDER BLOCK 1H",
                         "fvg":        "🔷 SOL/BNB/ETH  FVG 15m",
                     }
                     lines = ["📋 <b>ESTRATÉGIAS — estado actual</b>\n"]
@@ -3277,7 +3296,7 @@ def telegram_commands_loop() -> None:
                     lines.append(f"{tpol_icon} — 🎯 POL  SNIPER TSAR (Inversão Total)")
                     opb_icon = "✅ ON " if _mode_opb else "⛔ OFF"
                     opc_icon = "✅ ON " if _mode_opc else "⛔ OFF"
-                    lines.append(f"{opb_icon} — 📐 ETH/SOL/BNB/XRP/POL  OPÇÃO B (PA Indep.)")
+                    lines.append(f"{opb_icon} — 📐 ETH/SOL/BNB/POL  OPÇÃO B (PA Indep.)")
                     lines.append(f"{opc_icon} — 🔀 ETH/SOL  OPÇÃO C (Híbrido TSAR+PA)")
                     lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>\n"
                                  "<i>/tsar on | pause | off | status</i>\n"
@@ -3290,7 +3309,7 @@ def telegram_commands_loop() -> None:
                     _mode_opb = not _mode_opb
                     estado = "✅ LIGADA" if _mode_opb else "⭕ DESLIGADA"
                     tg(f"📐 <b>Opção B — PA Independentes: {estado}</b>\n"
-                       f"5 operacionais autónomos em ETH/SOL/BNB/XRP/POL\n"
+                       f"4 operacionais autónomos em ETH/SOL/BNB/POL\n"
                        f"Engolfo | Pin Bar | Inside Bar | EMA21 | 3 Soldiers\n"
                        f"{'⚠️ Mais trades — win rate ~72%' if _mode_opb else ''}",
                        chat_id)
@@ -3652,10 +3671,12 @@ def telegram_commands_loop() -> None:
                        "/opc — 🔀 Opção C Híbrido TSAR+PA ON/OFF\n"
                        "/clab — 🧹 Cancela TODAS as ordens abertas na OKX\n"
                        "/go[coin] — Confirma sinal pendente (120s)\n"
-                       "  /goeth  /gosol  /goxrp  /goada  /godoge  /gobnb\n"
+                       "  /goeth  /gosol  /goada  /godoge  /gobnb\n"
+                       "/frl p — Maker exit (limit no melhor ask/bid)\n"
+                       "/frl l — Limit exit no preço actual (sem taker fee)\n"
                        "/force [coin] — Ordem mercado bypass filtros\n"
                        "  Ex: <code>/force bnb</code>  (RSI 15m decide LONG/SHORT)\n\n"
-                       "🥇 POL/SOL/XRP/ETH/BNB/ADA/DOGE — TODOS AUTOMÁTICOS\n\n"
+                       "🥇 POL/SOL/ETH/BNB/ADA/DOGE — TODOS AUTOMÁTICOS\n\n"
                        f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD SL {HOLD_SL_PCT:.0f}%  |  STRICT SL {STRICT_SL_PCT:.1f}%\n"
                        f"GV5/GV6  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 5min", chat_id)
 
@@ -3663,6 +3684,59 @@ def telegram_commands_loop() -> None:
                 elif cmd == "v11":
                     try: tg(_v11_dashboard_text(), chat_id)
                     except Exception as e: tg(f"Erro /v11: {e}", chat_id)
+
+                # ── /frl — Saída via ordem LIMIT (modo Maker) ──────────────────
+                elif cmd == "frl":
+                    if not args or args[0] not in ("p", "l"):
+                        tg("💡 <b>/frl p</b> — Maker exit (limit no melhor ask/bid)\n"
+                           "<b>/frl l</b> — Limit exit no preço actual (evita taker fee)\n"
+                           "Cancela algos automaticamente antes de colocar.", chat_id)
+                    else:
+                        frl_mode = args[0]
+                        open_pos = None
+                        for _frl_inst in ALL_SYMS:
+                            for _frl_ps in ("long", "short"):
+                                _frl_pos = okx_get_position(_frl_inst, _frl_ps)
+                                if _frl_pos and float(_frl_pos.get("pos", 0) or 0) != 0:
+                                    open_pos = (_frl_inst, _frl_ps,
+                                                int(float(_frl_pos.get("pos", 0))),
+                                                float(_frl_pos.get("avgPx", 0)))
+                                    break
+                            if open_pos: break
+                        if not open_pos:
+                            tg("ℹ️ Nenhuma posição aberta encontrada.", chat_id)
+                        else:
+                            _fi, _fps, _fsz, _favg = open_pos
+                            _fsym = _fi.replace("-USDT-SWAP", "")
+                            try:
+                                if frl_mode == "p":
+                                    ob = okx_orderbook(_fi, depth=5)
+                                    if not ob:
+                                        tg("❌ Erro a ler orderbook.", chat_id)
+                                    else:
+                                        _bids, _asks = ob
+                                        if _fps == "long":
+                                            _flim = float(_asks[0][0])
+                                            _flbl = f"ask {_flim:.5f}"
+                                        else:
+                                            _flim = float(_bids[0][0])
+                                            _flbl = f"bid {_flim:.5f}"
+                                        cancel_all_open_orders(_fi); time.sleep(0.5)
+                                        okx_close_limit(_fi, _fps, _fsz, _flim)
+                                        tg(f"📋 <b>FRL MAKER EXIT</b>\n"
+                                           f"Par: <code>{_fsym}</code> | {_fps.upper()}\n"
+                                           f"Limit: <b>{_flbl}</b> | {_fsz} contratos\n"
+                                           f"Algos cancelados. A aguardar preenchimento...")
+                                else:
+                                    _flim = okx_ticker(_fi)
+                                    cancel_all_open_orders(_fi); time.sleep(0.5)
+                                    okx_close_limit(_fi, _fps, _fsz, _flim)
+                                    tg(f"📋 <b>FRL LIMIT EXIT</b>\n"
+                                       f"Par: <code>{_fsym}</code> | {_fps.upper()}\n"
+                                       f"Limit: <b>{_flim:.5f}</b> (preço actual)\n"
+                                       f"Algos cancelados.")
+                            except Exception as e:
+                                tg(f"❌ Erro /frl: {e}", chat_id)
 
         except Exception as e:
             log.warning("tg_polling: %s", e)
@@ -3697,7 +3771,6 @@ def duo_elite_loop() -> None:
     tg("🏆 <b>V11 FULL SQUAD — TODOS OS PARES AUTOMÁTICOS</b>\n\n"
        "🥇 <b>POL</b> — ICHIMOKU 1H (97.4% hit)\n"
        "🌊 <b>SOL</b> — SUPERTREND + FVG 15m\n"
-       "🎯 <b>XRP</b> — RSI DIV + VWAP + OB 1H\n"
        "💧 <b>ETH</b> — VWAP KISS + FVG 15m\n"
        "🔷 <b>BNB</b> — FVG 15m (65.2% hit)\n"
        "🛡️ <b>ADA</b> — ORDER BLOCK 1H\n"
@@ -3707,7 +3780,7 @@ def duo_elite_loop() -> None:
        "(O /go[coin] ainda existe para confirmar manualmente se quiseres)\n\n"
        f"🔒 GV5/GV6  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD {HOLD_SL_PCT:.0f}%  |  STRICT {STRICT_SL_PCT:.1f}%  |  "
        f"{LEVERAGE}× ALL-IN  |  cd 5min\n"
-       "✅ <b>11 ESTRATÉGIAS ATIVAS. TSAR V11 PRONTO.</b>")
+       "✅ <b>10 ESTRATÉGIAS ATIVAS. TSAR V11 PRONTO.</b>")
 
     while True:
         try:
@@ -3811,23 +3884,6 @@ def duo_elite_loop() -> None:
                 except Exception as e:
                     log.error("[SOL/ST] %s", e)
 
-            # ── 🎯 PRIORIDADE 3: XRP — RSI DIV + VWAP 15m (PF 2.38, STRICT) ─
-            if not fired and st_enabled["rsidiv"]:
-                try:
-                    sig = rsi_div_vwap_signal(okx_candles(SHIELD_XRP))
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🎯 RSI DIV+VWAP XRP → %s", sig.upper())
-                        tg(f"🎯 <b>XRP RSI DIV FIRED</b>\n"
-                           f"Par: <code>XRP-USDT-SWAP</code> | {dir_scout} | PF: <b>2.38</b> | STRICT 1.5%\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(SHIELD_XRP, sig, "RSI DIV+VWAP M15", tag="🎯 SAFETY SNIPER")
-                    else:
-                        log.info("[XRP/RSI] sem divergência")
-                except Exception as e:
-                    log.error("[XRP/RSI] %s", e)
-            # ╚═══════════════════════════════════════════════════════════════╝
-
             # ── 4: ETH — VWAP KISS ────────────────────────────────────────────
             if not fired and st_enabled["vwap"]:
                 try:
@@ -3875,22 +3931,6 @@ def duo_elite_loop() -> None:
                         log.info("[ADA] sem bloco")
                 except Exception as e:
                     log.error("[ADA] %s", e)
-
-            # ── 7: XRP — ORDER BLOCK DEFENSE ──────────────────────────────────
-            if not fired and st_enabled["ob"]:
-                try:
-                    sig = order_block_signal(okx_candles(SHIELD_XRP, bar="1H", limit=100))
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🛡️ ORDER BLOCK XRP → %s", sig.upper())
-                        tg(f"🛡️ <b>XRP ORDER BLOCK FIRED</b>\n"
-                           f"Par: <code>XRP-USDT-SWAP</code> | {dir_scout} | STRICT 1.5%\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(SHIELD_XRP, sig, "ORDER BLOCK 1H", tag="SHIELD 🛡️")
-                    else:
-                        log.info("[XRP/OB] sem bloco")
-                except Exception as e:
-                    log.error("[XRP/OB] %s", e)
 
             # ── 7b: DOGE — ORDER BLOCK DEFENSE (STRICT 1.5%) ─────────────────
             if not fired and st_enabled["ob"]:
@@ -3992,11 +4032,10 @@ def duo_elite_loop() -> None:
                     em_trade = _duo_in_trade
                 if not em_trade:
                     for par, inst_id, bar in [
-                        ("ETH", DUO_ETH,    "15m"),
-                        ("SOL", DUO_SOL,    "15m"),
-                        ("BNB", FVG_BNB,    "15m"),
-                        ("XRP", SHIELD_XRP, "15m"),
-                        ("POL", GOLD_POL,   "1H"),
+                        ("ETH", DUO_ETH,  "15m"),
+                        ("SOL", DUO_SOL,  "15m"),
+                        ("BNB", FVG_BNB,  "15m"),
+                        ("POL", GOLD_POL, "1H"),
                     ]:
                         try:
                             df = okx_candles(inst_id, bar=bar, limit=300)
@@ -4007,7 +4046,8 @@ def duo_elite_loop() -> None:
                                     tg(f"📐 <b>OpB — {pa_name.upper()} {par}</b>\n"
                                        f"Sinal: {'📈 LONG' if sig == 'buy' else '📉 SHORT'} | {bar}")
                                     fired = _fire(inst_id, sig,
-                                                  f"OpB {pa_name}", tag=f"📐 OpB {par}")
+                                                  f"OpB {pa_name}", tag=f"📐 OpB {par}",
+                                                  sl_pct=1.5, min_trail_pct=0.8)
                                     if fired: break
                             if fired: break
                         except Exception as e:
@@ -4026,17 +4066,16 @@ def duo_elite_loop() -> None:
                                 if not sig: continue
                                 tsar_confirma = tsar_signal(inst_id) == sig
                                 lev_label = "5×" if tsar_confirma else "3×"
-                                lev_real  = LEVERAGE if tsar_confirma else 3
+                                qty_mult  = 5.0 / LEVERAGE if tsar_confirma else 3.0 / LEVERAGE
                                 log.info("[OpC] %s %s %s tsar=%s lev=%s",
-                                         pa_name, par, sig, tsar_confirma, lev_real)
+                                         pa_name, par, sig, tsar_confirma, lev_label)
                                 tg(f"🔀 <b>OpC — {pa_name.upper()} {par}</b>\n"
                                    f"Sinal: {'📈 LONG' if sig == 'buy' else '📉 SHORT'}\n"
                                    f"{'✅ TSAR confirma — ' if tsar_confirma else '⚡ Só PA — '}{lev_label}")
-                                _lev_orig = LEVERAGE
-                                globals()["LEVERAGE"] = lev_real
                                 fired = _fire(inst_id, sig,
-                                              f"OpC {pa_name}", tag=f"🔀 OpC {par}")
-                                globals()["LEVERAGE"] = _lev_orig
+                                              f"OpC {pa_name}", tag=f"🔀 OpC {par}",
+                                              sl_pct=1.5, qty_mult=qty_mult,
+                                              min_trail_pct=0.8)
                                 if fired: break
                             if fired: break
                         except Exception as e:
