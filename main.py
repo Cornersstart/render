@@ -180,8 +180,9 @@ MONTHLY_GOAL_USD = 600.0
 # ── Panic pause ────────────────────────────────────────────────────────────
 _panic_until: float = 0.0
 _btc_sentinel_active: bool = True
-_mode_opb: bool = False   # Opção B — PA independentes (ETH/SOL/BNB/XRP/POL)
+_mode_opb: bool = False   # Opção B — PA independentes (ETH/SOL/BNB/POL)
 _mode_opc: bool = False   # Opção C — híbrido TSAR+PA: 5× se TSAR confirma, 3× só PA
+_mode_opd: bool = False   # Opção D — Sniper MACD M5 (ETH/SOL/POL)
 
 # ── Estratégias habilitadas — /pausar /activar individuais ───────────────────
 _STRATEGY_KEYS = ("ichimoku", "supertrend", "rsidiv", "vwap", "engolfo", "ob", "fvg")
@@ -1449,7 +1450,8 @@ def _v11_dashboard_text() -> str:
         f"POL SNIPER TSAR: {mp(_tsar_pol_mode)}\n\n"
         "⚔️ <b>MODOS DE PRICE ACTION:</b>\n"
         f"OPÇÃO B (PA Independente): {m(_mode_opb)}\n"
-        f"OPÇÃO C (Híbrido 5×/3×): {m(_mode_opc)}\n\n"
+        f"OPÇÃO C (Híbrido 5×/3×): {m(_mode_opc)}\n"
+        f"⚡ OPÇÃO D (Sniper MACD M5): {m(_mode_opd)}\n\n"
         "🛑 <b>FILTROS GLOBAIS DE SEGURANÇA:</b>\n"
         f"BTC Sentinel (RSI M15): {'✅ ATIVO' if _btc_sentinel_active else '⛔ DESLIGADO'}\n"
         f"Prioridade Ichimoku 1H: {'✅ ATIVO (Invertido)' if ichi_pr else '⛔ OFF'}\n"
@@ -1767,6 +1769,50 @@ def signal_three_soldiers(df: pd.DataFrame) -> str | None:
              and vol_cresce)
     if soldiers: return "buy"
     if crows: return "sell"
+    return None
+
+def signal_macd_bollinger(df: pd.DataFrame) -> str | None:
+    """OpD — Sniper MACD M5: exaustão fora das BB + histograma MACD a reverter.
+
+    LONG: vela anterior fecha abaixo BB inferior → vela actual regressa dentro
+          + histograma MACD era negativo e virou para cima.
+    SHORT: simétrico (acima BB superior, histograma positivo virando para baixo).
+    Timeframe recomendado: 5m.
+    """
+    if len(df) < 50: return None
+    df = df.copy()
+    bb = ta.bbands(df["close"], length=20, std=2.0)
+    if bb is None or bb.empty: return None
+    col_u = next((c for c in bb.columns if c.startswith("BBU_")), None)
+    col_l = next((c for c in bb.columns if c.startswith("BBL_")), None)
+    if col_u is None or col_l is None: return None
+    df["bb_u"] = bb[col_u]; df["bb_l"] = bb[col_l]
+
+    macd_df = ta.macd(df["close"], fast=12, slow=26, signal=9)
+    if macd_df is None or macd_df.empty: return None
+    hist_col = next((c for c in macd_df.columns if "MACDh" in c), None)
+    if hist_col is None: return None
+    df["hist"] = macd_df[hist_col]
+
+    prev  = df.iloc[-2]
+    prev2 = df.iloc[-3]
+    if pd.isna(prev["bb_u"]) or pd.isna(prev["hist"]) or pd.isna(prev2["hist"]):
+        return None
+
+    long_cond = (
+        float(prev2["close"]) < float(prev2["bb_l"])
+        and float(prev["close"]) >= float(prev["bb_l"])
+        and float(prev2["hist"]) < 0
+        and float(prev["hist"]) > float(prev2["hist"])
+    )
+    short_cond = (
+        float(prev2["close"]) > float(prev2["bb_u"])
+        and float(prev["close"]) <= float(prev["bb_u"])
+        and float(prev2["hist"]) > 0
+        and float(prev["hist"]) < float(prev2["hist"])
+    )
+    if long_cond: return "buy"
+    if short_cond: return "sell"
     return None
 
 PA_SIGNALS: dict[str, callable] = {
@@ -3157,7 +3203,7 @@ _GO_MAP = {
 }
 
 def telegram_commands_loop() -> None:
-    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode, _tsar_combat_grau, _mode_opb, _mode_opc
+    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode, _tsar_combat_grau, _mode_opb, _mode_opc, _mode_opd
     if not TELEGRAM_TOKEN:
         log.warning("TELEGRAM_TOKEN não configurado — comandos desativados.")
         return
@@ -3296,12 +3342,14 @@ def telegram_commands_loop() -> None:
                     lines.append(f"{tpol_icon} — 🎯 POL  SNIPER TSAR (Inversão Total)")
                     opb_icon = "✅ ON " if _mode_opb else "⛔ OFF"
                     opc_icon = "✅ ON " if _mode_opc else "⛔ OFF"
+                    opd_icon = "✅ ON " if _mode_opd else "⛔ OFF"
                     lines.append(f"{opb_icon} — 📐 ETH/SOL/BNB/POL  OPÇÃO B (PA Indep.)")
                     lines.append(f"{opc_icon} — 🔀 ETH/SOL  OPÇÃO C (Híbrido TSAR+PA)")
+                    lines.append(f"{opd_icon} — ⚡ ETH/SOL/POL  OPÇÃO D (Sniper MACD M5)")
                     lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>\n"
                                  "<i>/tsar on | pause | off | status</i>\n"
                                  "<i>/tsarpol on | pause | off | status</i>\n"
-                                 "<i>/opb — toggle OpB | /opc — toggle OpC</i>")
+                                 "<i>/opb — toggle OpB | /opc — toggle OpC | /opd — toggle OpD</i>")
                     tg("\n".join(lines), chat_id)
 
                 # ── /opb — Opção B PA Independentes ON/OFF ───────────────────
@@ -3325,6 +3373,17 @@ def telegram_commands_loop() -> None:
                        f"{'⚠️ Equilíbrio entre frequência e precisão' if _mode_opc else ''}",
                        chat_id)
                     log.info("Opção C: %s", estado)
+
+                # ── /opd — Opção D Sniper MACD M5 ON/OFF ─────────────────────
+                elif cmd == "opd":
+                    _mode_opd = not _mode_opd
+                    estado = "✅ LIGADA" if _mode_opd else "⭕ DESLIGADA"
+                    tg(f"⚡ <b>Opção D — Sniper MACD M5: {estado}</b>\n"
+                       f"Pares: ETH · SOL · POL\n"
+                       f"BB exaustão + histograma MACD a reverter | SL 1.5% | Trail +0.8%\n"
+                       f"{'⚠️ Sniper de alta precisão — M5 rápido' if _mode_opd else ''}",
+                       chat_id)
+                    log.info("Opção D: %s", estado)
 
                 # ── /sentinel [on|off] — toggle ou força estado BTC Sentinel ───
                 elif cmd == "sentinel":
@@ -4080,6 +4139,32 @@ def duo_elite_loop() -> None:
                             if fired: break
                         except Exception as e:
                             log.error("[OpC] %s: %s", par, e)
+
+            # ── OPÇÃO D — Sniper MACD M5 (ETH/SOL/POL) ─────────────────────
+            if _mode_opd and not fired:
+                with _duo_lock:
+                    em_trade = _duo_in_trade
+                if not em_trade:
+                    for _d_inst, _d_par in [
+                        (DUO_ETH,  "ETH"),
+                        (DUO_SOL,  "SOL"),
+                        (GOLD_POL, "POL"),
+                    ]:
+                        try:
+                            df5 = okx_candles(_d_inst, bar="5m", limit=100)
+                            sig = signal_macd_bollinger(df5)
+                            if sig:
+                                dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                                log.info("[OpD] MACD BB %s → %s", _d_par, sig.upper())
+                                tg(f"⚡ <b>OpD: SNIPER MACD M5</b>\n"
+                                   f"Par: <code>{_d_inst}</code> | {dir_scout}\n"
+                                   f"BB exaustão + MACD a reverter | SL 1.5% | Trail +0.8%")
+                                fired = _fire(_d_inst, sig,
+                                              f"OpD MACD {_d_par}", tag=f"⚡ OpD {_d_par}",
+                                              sl_pct=1.5, min_trail_pct=0.8)
+                                if fired: break
+                        except Exception as e:
+                            log.error("[OpD] %s: %s", _d_par, e)
 
         except Exception as e:
             log.error("loop: %s", e)
