@@ -167,7 +167,6 @@ _duo_lock                  = threading.Lock()
 
 _bot_authorized: bool = True
 _auth_lock             = threading.Lock()
-_priority_mode: str    = ""      # "" = off | "ichimoku" = alinhamento com nuvem obrigatório
 _armadilha_mode: bool  = False   # False = off | True = Bollinger mean-reversion activo
 _trail_mode: str       = "gv5"   # "gv5" = Step Trail V5 | "gv6" = SAR M15 trailing
 _tsar_mode: str        = "on"    # "on" = activo por defeito | "" = off | "paused" = sem novas entradas
@@ -1426,7 +1425,7 @@ def _v11_dashboard_text() -> str:
     def m(flag):  return "✅ ON"  if flag else "⛔ OFF"
     def mp(mode): return "✅ ON"  if mode == "on" else ("⚠️ PAUSED" if mode == "paused" else "⛔ OFF")
     def s(key):   return "✅"     if st.get(key, False) else "⛔"
-    ichi_pr = _priority_mode == "ichimoku"
+    ichi_pr = False  # /pr ichimoku removido — filtro desactivado permanentemente
     anti_ig = _tsar_pol_mode == "on"
     return (
         "📊 <b>PAINEL DE COMANDO V11</b> 📊\n\n"
@@ -2247,20 +2246,6 @@ def _fire(inst_id: str, side: str, signal_name: str,
                 return False
     else:
         log.info("⚡ [FORCE] %s — filtros IGNORADOS", sym)
-
-    # ── ICHIMOKU PRIORITY — alinhamento com nuvem ───────────────────────────
-    if not force and _priority_mode == "ichimoku":
-        cloud = _ichimoku_cloud_dir(inst_id)
-        if cloud == "bull" and side == "sell":
-            log.info("[ICHI PR] %s SHORT bloqueado — preço acima da nuvem", sym)
-            tg(f"[🥇 ICHI PR] <b>{sym} SHORT bloqueado</b>\nPreço acima da nuvem — alinhamento obrigatório.")
-            return False
-        if cloud == "bear" and side == "buy":
-            log.info("[ICHI PR] %s LONG bloqueado — preço abaixo da nuvem", sym)
-            tg(f"[🥇 ICHI PR] <b>{sym} LONG bloqueado</b>\nPreço abaixo da nuvem — alinhamento obrigatório.")
-            return False
-        if cloud == "neutral":
-            log.info("[ICHI PR] %s em zona neutra — entrada permitida", sym)
 
     # ── FILTRO M5 / ARMADILHA TRIPLE BB ─────────────────────────────────────
     sar_px = 0.0
@@ -3124,7 +3109,7 @@ def _status_text() -> str:
             f"/go[coin] /gv5 /gv6 /force [coin] /risco\n"
             f"/tsar on|pause|off|status\n"
             f"/tsarpol on|pause|off|status\n"
-            f"/subir [2-10]  |  /armadilha  |  /pr ichimoku\n"
+            f"/subir [2-10]  |  /armadilha\n"
             f"/pause → só /start desbloqueia")
 
 def report_loop() -> None:
@@ -3382,21 +3367,6 @@ def telegram_commands_loop() -> None:
                         warn = "\n⚠️ SL automático essencial neste nível!" if lev >= 8 else ""
                         tg(f"🚀 <b>Alavancagem → {lev}×</b> {risk}\nAplicado em todos os pares.{warn}", chat_id)
                         log.info("Alavancagem alterada para %dx via Telegram", lev)
-
-                # ── /pr [modo] — toggle de modo de prioridade ─────────────────
-                elif cmd == "pr":
-                    global _priority_mode
-                    if not args or args[0] != "ichimoku":
-                        tg("❌ Uso: <code>/pr ichimoku</code>", chat_id)
-                    elif _priority_mode == "ichimoku":
-                        _priority_mode = ""
-                        tg("🔓 <b>Prioridade Ichimoku DESLIGADA</b>\nOrdens entram sem verificação de nuvem.", chat_id)
-                    else:
-                        _priority_mode = "ichimoku"
-                        tg("🥇 <b>MODO PRIORIDADE ICHIMOKU ACTIVADO</b>\n"
-                           "Todas as estratégias só entram alinhadas com a nuvem.\n"
-                           "LONG: preço acima | SHORT: preço abaixo.\n"
-                           "Usa <code>/pr ichimoku</code> para desligar.", chat_id)
 
                 elif cmd == "armadilha":
                     global _armadilha_mode
@@ -3657,7 +3627,8 @@ def telegram_commands_loop() -> None:
                        "/estrategias — Lista quais estão ON/OFF\n"
                        "/pausar [chave] — Pausa estratégia individual\n"
                        "/activar [chave] — Reactiva estratégia individual\n"
-                       "  Chaves: <code>ichimoku | supertrend | rsidiv | vwap | engolfo | ob | fvg | tudo</code>\n\n"
+                       "  Chaves: <code>ichimoku | supertrend | rsidiv | vwap | engolfo | ob | fvg | tudo</code>\n"
+                       "☁️ Ichimoku POL activo em modo INVERTIDO (exaustão)\n\n"
                        "<b>Alavancagem:</b>\n"
                        "/subir6x — Mudar para 6× (aplica imediatamente)\n"
                        "/subir7x — Mudar para 7× (aplica imediatamente)\n\n"
@@ -3776,13 +3747,19 @@ def duo_elite_loop() -> None:
             # ── 🥇 PRIORIDADE 1: POL — ICHIMOKU 1H (97.4% hit, HOLD) ────────
             if not fired and st_enabled["ichimoku"]:
                 try:
-                    sig = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
+                    sig_raw = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
+                    # Modo exaustão: sinal invertido — o Ichimoku na POL
+                    # gerava -$200 seguindo tendência. Invertido usa o sinal
+                    # como indicador de exaustão e entra na reversão.
+                    if sig_raw == "buy":    sig = "sell"
+                    elif sig_raw == "sell": sig = "buy"
+                    else:                  sig = None
                     if sig:
+                        log.info("[ICHI POL INVERTIDO] raw=%s → entrada=%s", sig_raw, sig)
                         dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🥇 ICHIMOKU POL → %s", sig.upper())
-                        tg(f"🥇 <b>GOLDEN — POL ICHIMOKU FIRED</b>\n"
-                           f"Par: <code>POL-USDT-SWAP</code> | Sinal: <b>ICHIMOKU 1H</b>\n"
-                           f"Direção: <b>{dir_scout}</b>  | Hit histórico: <b>97.4%</b>\n"
+                        tg(f"🥇 <b>GOLDEN — POL ICHIMOKU INVERTIDO</b>\n"
+                           f"Par: <code>POL-USDT-SWAP</code> | Sinal: <b>ICHIMOKU 1H (exaustão)</b>\n"
+                           f"Direção: <b>{dir_scout}</b>  | raw={sig_raw} → invertido\n"
                            f"💰 Hold the hand — alvo $20 NET. Circuit breaker -{CIRCUIT_BREAKER_PCT:.0f}%.")
                         fired = _fire(GOLD_POL, sig, "ICHIMOKU POL", tag="🥇 GOLDEN POL")
                     else:
