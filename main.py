@@ -2324,6 +2324,37 @@ def get_btc_sentiment() -> tuple[str, bool, float, float, float]:
         log.warning("BTC Sentinel erro: %s — permitindo entrada", e)
         return ("NEUTRO", False, 0.0, 0.0, 0.0)
 
+
+def is_bullish_pin_bar(candle) -> bool:
+    """Vela com pavio inferior dominante: lower_wick > 60% range e corpo < 30% range."""
+    body        = abs(float(candle["close"]) - float(candle["open"]))
+    lower_wick  = min(float(candle["open"]), float(candle["close"])) - float(candle["low"])
+    total_range = float(candle["high"]) - float(candle["low"])
+    if total_range <= 0:
+        return False
+    return (lower_wick > total_range * 0.6) and (body < total_range * 0.3)
+
+
+def check_exhaustion_override(inst_id: str, sym: str) -> bool:
+    """Exceção Tática: libera LONG bearish se RSI M15 BTC < 35 e pin bar bullish presente.
+
+    Retorna True (override ativo) ou False (manter bloqueio).
+    """
+    try:
+        df_btc      = okx_candles("BTC-USDT-SWAP", bar="15m", limit=20)
+        current_rsi = float(ta.rsi(df_btc["close"], length=14).iloc[-1])
+        last_candle = df_btc.iloc[-1]
+        if current_rsi < 35 and is_bullish_pin_bar(last_candle):
+            log.info("🛡️ SENTINEL OVERRIDE: Exaustão e Pin Bar detectados no BTC M15. Liberando LONG!")
+            tg("⚠️ [SENTINEL OVERRIDE] Tendência Macro de Baixa, mas detectado "
+               "PIN BAR + RSI em Exaustão no BTC M15. Ordem Liberada! 🚀")
+            return True
+        return False
+    except Exception as e:
+        log.warning("check_exhaustion_override %s: %s", inst_id, e)
+        return False
+
+
 def _fire(inst_id: str, side: str, signal_name: str,
           tag: str = "DUO ELITE", sl_pct: float | None = None,
           force: bool = False, qty_mult: float = 1.0,
@@ -2378,10 +2409,13 @@ def _fire(inst_id: str, side: str, signal_name: str,
                    f"BTC {btc_sentiment} (1H) — não vender contra a maré.")
                 return False
             elif btc_sentiment in ("BEARISH", "BEARISH_FRACO") and side == "buy":
-                log.info("[SENTINEL 🛡️] %s LONG bloqueado — BTC %s", sym, btc_sentiment)
-                tg(f"[SENTINEL 🛡️] <b>{sym} LONG bloqueado</b>\n"
-                   f"BTC {btc_sentiment} (1H) — não comprar contra a maré.")
-                return False
+                if check_exhaustion_override(inst_id, sym):
+                    pass  # Exceção Tática ativa — permite continuar
+                else:
+                    log.info("[SENTINEL 🛡️] %s LONG bloqueado — BTC %s", sym, btc_sentiment)
+                    tg(f"[SENTINEL 🛡️] <b>{sym} LONG bloqueado</b>\n"
+                       f"BTC {btc_sentiment} (1H) — não comprar contra a maré.")
+                    return False
     else:
         log.info("⚡ [FORCE] %s — filtros IGNORADOS", sym)
 
