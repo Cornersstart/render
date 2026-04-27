@@ -1817,6 +1817,36 @@ def signal_macd_bollinger(df: pd.DataFrame) -> str | None:
     if short_cond: return "sell"
     return None
 
+def _verify_macro_bollinger(inst_id: str, side: str) -> bool:
+    """Confirma exaustão MTFA: M15 ou H1 devem ter a vela anterior fora/tocando a BB(20,2).
+
+    LONG: low M15 ou H1 <= banda inferior → exaustão de baixa confirmada no macro.
+    SHORT: high M15 ou H1 >= banda superior → exaustão de alta confirmada no macro.
+    Retorna True se pelo menos um timeframe confirmar.
+    """
+    try:
+        df15 = okx_candles(inst_id, bar="15m", limit=30)
+        df1h = okx_candles(inst_id, bar="1H",  limit=30)
+
+        def _bb_exhausted(df: pd.DataFrame, direction: str) -> bool:
+            bb = ta.bbands(df["close"], length=20, std=2.0)
+            if bb is None or bb.empty: return False
+            col_u = next((c for c in bb.columns if c.startswith("BBU_")), None)
+            col_l = next((c for c in bb.columns if c.startswith("BBL_")), None)
+            if col_u is None or col_l is None: return False
+            prev = df.iloc[-2]
+            if direction == "buy":
+                return float(prev["low"]) <= float(bb[col_l].iloc[-2])
+            else:
+                return float(prev["high"]) >= float(bb[col_u].iloc[-2])
+
+        m15_ok = _bb_exhausted(df15, side)
+        h1_ok  = _bb_exhausted(df1h, side)
+        return m15_ok or h1_ok
+    except Exception as e:
+        log.warning("_verify_macro_bollinger %s: %s", inst_id, e)
+        return False
+
 PA_SIGNALS: dict[str, callable] = {
     "engolfo":    signal_engolfo,
     "pin_bar":    signal_pin_bar,
@@ -4280,11 +4310,15 @@ def duo_elite_loop() -> None:
                             df5 = okx_candles(_d_inst, bar="5m", limit=100)
                             sig = signal_macd_bollinger(df5)
                             if sig:
+                                if not _verify_macro_bollinger(_d_inst, sig):
+                                    log.info("[OpD] %s M5 sinal OK mas MTFA não confirma — ignorado", _d_par)
+                                    continue
                                 dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                                log.info("[OpD] MACD BB %s → %s", _d_par, sig.upper())
-                                tg(f"⚡ <b>OpD: SNIPER MACD M5</b>\n"
+                                log.info("[OpD] MACD BB+MTFA %s → %s", _d_par, sig.upper())
+                                tg(f"⚡ <b>OpD MTFA: SNIPER MACD M5+H1</b>\n"
                                    f"Par: <code>{_d_inst}</code> | {dir_scout}\n"
-                                   f"BB exaustão + MACD a reverter | SL 1.5% | Trail +0.8%")
+                                   f"BB exaustão M5 + confirmação Macro (M15/H1)\n"
+                                   f"SL 1.5% | Trail +0.8%")
                                 fired = _fire(_d_inst, sig,
                                               f"OpD MACD {_d_par}", tag=f"⚡ OpD {_d_par}",
                                               sl_pct=1.5, min_trail_pct=0.8)
