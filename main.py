@@ -183,6 +183,7 @@ _btc_sentinel_active: bool = True
 _mode_opb: bool = False   # Opção B — PA independentes (ETH/SOL/BNB/POL)
 _mode_opc: bool = False   # Opção C — híbrido TSAR+PA: 5× se TSAR confirma, 3× só PA
 _mode_opd: bool = False   # Opção D — Sniper MACD M5 (ETH/SOL/POL)
+_mode_ope: bool = False   # Opção E — ICT/SMC Institucional 15m (BTC/ETH/SOL)
 
 # ── Estratégias habilitadas — /pausar /activar individuais ───────────────────
 _STRATEGY_KEYS = ("ichimoku", "supertrend", "rsidiv", "vwap", "engolfo", "ob", "fvg")
@@ -1451,7 +1452,8 @@ def _v11_dashboard_text() -> str:
         "⚔️ <b>MODOS DE PRICE ACTION:</b>\n"
         f"OPÇÃO B (PA Independente): {m(_mode_opb)}\n"
         f"OPÇÃO C (Híbrido 5×/3×): {m(_mode_opc)}\n"
-        f"⚡ OPÇÃO D (Sniper MACD M5): {m(_mode_opd)}\n\n"
+        f"⚡ OPÇÃO D (Sniper MACD M5): {m(_mode_opd)}\n"
+        f"🏦 OPÇÃO E (ICT/Institucional 15m): {m(_mode_ope)}\n\n"
         "🛑 <b>FILTROS GLOBAIS DE SEGURANÇA:</b>\n"
         f"BTC Sentinel (RSI M15): {'✅ ATIVO' if _btc_sentinel_active else '⛔ DESLIGADO'}\n"
         f"Prioridade Ichimoku 1H: {'✅ ATIVO (Invertido)' if ichi_pr else '⛔ OFF'}\n"
@@ -1826,6 +1828,41 @@ PA_SIGNALS: dict[str, callable] = {
 # ══════════════════════════════════════════════════════════════════════════════
 # MONITOR — aguarda fecho de posição em thread separada
 # ══════════════════════════════════════════════════════════════════════════════
+
+def signal_ict_fvg(df: pd.DataFrame) -> str | None:
+    """OpE — ICT/SMC Sweep + FVG + Pullback (15m).
+
+    SHORT: v4 sweep de topo (pavio longo, fecha em baixa) + FVG bearish + pullback que toca o gap.
+    LONG:  v4 sweep de fundo (pavio longo, fecha em alta) + FVG bullish + pullback que toca o gap.
+    Timeframe recomendado: 15m.
+    """
+    if len(df) < 30: return None
+    df = df.copy()
+
+    v1 = df.iloc[-2]   # pullback gatilho (última vela fechada)
+    v2 = df.iloc[-3]   # vela do meio (cria o FVG)
+    v4 = df.iloc[-5]   # vela do Sweep (captura de liquidez)
+
+    hist_high = float(df["high"].iloc[-25:-5].max())
+    hist_low  = float(df["low"].iloc[-25:-5].min())
+
+    # ── SETUP BEARISH (SHORT) ─────────────────────────────────────────────────
+    sweep_high    = float(v4["high"]) > hist_high and float(v4["close"]) < float(v4["open"])
+    fvg_bear_gap  = float(v4["low"])  > float(v2["high"])
+    pullback_bear = float(v1["high"]) >= float(v2["high"]) and float(v1["close"]) < float(v4["low"])
+
+    if sweep_high and fvg_bear_gap and pullback_bear:
+        return "sell"
+
+    # ── SETUP BULLISH (LONG) ──────────────────────────────────────────────────
+    sweep_low     = float(v4["low"])  < hist_low and float(v4["close"]) > float(v4["open"])
+    fvg_bull_gap  = float(v4["high"]) < float(v2["low"])
+    pullback_bull = float(v1["low"]) <= float(v2["low"]) and float(v1["close"]) > float(v4["high"])
+
+    if sweep_low and fvg_bull_gap and pullback_bull:
+        return "buy"
+
+    return None
 
 def _get_real_exit(inst_id: str) -> tuple[float, float]:
     """Retorna (closeAvgPx, pnl_líquido) da última posição fechada via positions-history.
@@ -3004,6 +3041,69 @@ def _bt_rsi_div(df: pd.DataFrame) -> str | None:
         return "sell"
     return None
 
+def cmd_cenario(inst_id: str = "BTC-USDT-SWAP") -> str:
+    """Diagnóstico de mercado via ADX(14) + EMA200 no 1H — recomenda módulo a activar."""
+    try:
+        df = okx_candles(inst_id, bar="1H", limit=220)
+        if len(df) < 200:
+            return "❌ Dados insuficientes para análise (precisa ≥200 velas 1H)."
+
+        close  = df["close"]
+        ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1])
+        px     = float(close.iloc[-1])
+        sym    = inst_id.replace("-USDT-SWAP", "")
+
+        adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+        if adx_df is None or adx_df.empty:
+            return "❌ Erro a calcular ADX."
+        adx_col = next((c for c in adx_df.columns if c.startswith("ADX_")), None)
+        if adx_col is None:
+            return "❌ Coluna ADX não encontrada."
+        adx = float(adx_df[adx_col].iloc[-1])
+
+        px_vs_ema = "acima" if px > ema200 else "abaixo"
+        trend_str = "📈 ALTA" if px > ema200 else "📉 BAIXA"
+
+        if adx < 25:
+            cenario = "🌊 MERCADO LATERAL / CONSOLIDAÇÃO"
+            rec = (
+                "ADX < 25 — sem força direcional. Tendências falsas dominam.\n\n"
+                "🎯 <b>RECOMENDAÇÃO:</b>\n"
+                "✅ Ligar: <code>/opd</code> (Sniper MACD M5) ou <code>/tsarpol on</code>\n"
+                "⛔ Desligar: OpB e OpC (risco de falsos rompimentos)"
+            )
+        elif px > ema200:
+            cenario = "📈 TENDÊNCIA DE ALTA CONFIRMADA"
+            rec = (
+                f"ADX ≥ 25 + preço acima EMA200 ({ema200:.2f}) — momentum bullish.\n\n"
+                "🎯 <b>RECOMENDAÇÃO:</b>\n"
+                "✅ Ligar: <code>/opb</code> (PA — surfar pullbacks de alta)\n"
+                "⚠️ Opcional: <code>/pr ichimoku</code> como filtro extra\n"
+                "⛔ Desligar: TSAR V11 (pode tentar adivinhar topo)"
+            )
+        else:
+            cenario = "📉 TENDÊNCIA DE BAIXA (BEARISH)"
+            rec = (
+                f"ADX ≥ 25 + preço abaixo EMA200 ({ema200:.2f}) — momentum bearish.\n\n"
+                "🎯 <b>RECOMENDAÇÃO:</b>\n"
+                "✅ Ligar: <code>/opb</code> com foco em Shorts nos repiques\n"
+                "✅ Opcional: <code>/tsar on</code> para repiques bruscos\n"
+                "⛔ Evitar: Longs contra tendência"
+            )
+
+        return (
+            f"🧭 <b>DIAGNÓSTICO DE CENÁRIO — {sym} 1H</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{cenario}</b>\n\n"
+            f"📊 ADX(14): <b>{adx:.1f}</b> {'⚡ Forte' if adx >= 25 else '😴 Fraco'}\n"
+            f"📉 EMA200:  <b>{ema200:.4f}</b>\n"
+            f"💰 Preço:   <b>{px:.4f}</b> ({px_vs_ema} da EMA200 {trend_str})\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{rec}"
+        )
+    except Exception as e:
+        return f"❌ Erro /cenario: {e}"
+
 def cmd_backtest() -> str:
     """Backtest real 100 dias — busca candles OKX e simula cada estratégia vela a vela."""
     tg("⏳ <b>BACKTEST INICIADO</b>\nBuscando 100 dias de dados reais OKX...\nAguarda ~40 segundos.")
@@ -3203,7 +3303,7 @@ _GO_MAP = {
 }
 
 def telegram_commands_loop() -> None:
-    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode, _tsar_combat_grau, _mode_opb, _mode_opc, _mode_opd
+    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode, _tsar_combat_grau, _mode_opb, _mode_opc, _mode_opd, _mode_ope
     if not TELEGRAM_TOKEN:
         log.warning("TELEGRAM_TOKEN não configurado — comandos desativados.")
         return
@@ -3343,13 +3443,15 @@ def telegram_commands_loop() -> None:
                     opb_icon = "✅ ON " if _mode_opb else "⛔ OFF"
                     opc_icon = "✅ ON " if _mode_opc else "⛔ OFF"
                     opd_icon = "✅ ON " if _mode_opd else "⛔ OFF"
+                    ope_icon = "✅ ON " if _mode_ope else "⛔ OFF"
                     lines.append(f"{opb_icon} — 📐 ETH/SOL/BNB/POL  OPÇÃO B (PA Indep.)")
                     lines.append(f"{opc_icon} — 🔀 ETH/SOL  OPÇÃO C (Híbrido TSAR+PA)")
                     lines.append(f"{opd_icon} — ⚡ ETH/SOL/POL  OPÇÃO D (Sniper MACD M5)")
+                    lines.append(f"{ope_icon} — 🏦 BTC/ETH/SOL  OPÇÃO E (ICT/SMC 15m)")
                     lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>\n"
                                  "<i>/tsar on | pause | off | status</i>\n"
                                  "<i>/tsarpol on | pause | off | status</i>\n"
-                                 "<i>/opb — toggle OpB | /opc — toggle OpC | /opd — toggle OpD</i>")
+                                 "<i>/opb /opc /opd /ope — toggle modos PA</i>")
                     tg("\n".join(lines), chat_id)
 
                 # ── /opb — Opção B PA Independentes ON/OFF ───────────────────
@@ -3384,6 +3486,18 @@ def telegram_commands_loop() -> None:
                        f"{'⚠️ Sniper de alta precisão — M5 rápido' if _mode_opd else ''}",
                        chat_id)
                     log.info("Opção D: %s", estado)
+
+                # ── /ope — Opção E ICT/SMC Institucional 15m ON/OFF ──────────
+                elif cmd == "ope":
+                    _mode_ope = not _mode_ope
+                    estado = "✅ LIGADA" if _mode_ope else "⭕ DESLIGADA"
+                    tg(f"🏦 <b>Opção E — ICT/Institucional 15m: {estado}</b>\n"
+                       f"Pares: BTC · ETH · SOL\n"
+                       f"Sweep de liquidez + FVG + Pullback ao gap\n"
+                       f"SL estrutural (topo/fundo da vela Sweep) | Trail +0.8%\n"
+                       f"{'⚡ Modo institucional activado — elite setup' if _mode_ope else ''}",
+                       chat_id)
+                    log.info("Opção E: %s", estado)
 
                 # ── /sentinel [on|off] — toggle ou força estado BTC Sentinel ───
                 elif cmd == "sentinel":
@@ -3721,13 +3835,16 @@ def telegram_commands_loop() -> None:
                        "/lpd — P&amp;L realizado últimas 24h\n"
                        "/meta — Progresso meta $600/mês\n"
                        "/risco — Análise táctica (book + SL + veredito)\n"
-                       "/backtest — Backtest real 100 dias OKX (~40s)\n\n"
+                       "/backtest — Backtest real 100 dias OKX (~40s)\n"
+                       "/cenario — Diagnóstico ADX+EMA200 BTC 1H + recomendação\n\n"
                        "<b>Acção manual:</b>\n"
                        "/gv5 — Step Trail V5 | /gv6 — SAR M15 trailing\n"
                        "/tsar on|pause|off|status — TSAR V11 Expulsão\n"
                        "/combat on|off — alias rápido /tsar | /grau — estado GV5\n"
                        "/opb — 📐 Opção B PA Independentes ON/OFF\n"
                        "/opc — 🔀 Opção C Híbrido TSAR+PA ON/OFF\n"
+                       "/opd — ⚡ Opção D Sniper MACD M5 ON/OFF\n"
+                       "/ope — 🏦 Opção E ICT/SMC Institucional 15m ON/OFF\n"
                        "/clab — 🧹 Cancela TODAS as ordens abertas na OKX\n"
                        "/go[coin] — Confirma sinal pendente (120s)\n"
                        "  /goeth  /gosol  /goada  /godoge  /gobnb\n"
@@ -3743,6 +3860,15 @@ def telegram_commands_loop() -> None:
                 elif cmd == "v11":
                     try: tg(_v11_dashboard_text(), chat_id)
                     except Exception as e: tg(f"Erro /v11: {e}", chat_id)
+
+                # ── /cenario — Diagnóstico ADX+EMA200 + recomendação de módulo ──
+                elif cmd == "cenario":
+                    inst = "BTC-USDT-SWAP"
+                    if args:
+                        coin = args[0].upper()
+                        inst = f"{coin}-USDT-SWAP"
+                    try: tg(cmd_cenario(inst), chat_id)
+                    except Exception as e: tg(f"Erro /cenario: {e}", chat_id)
 
                 # ── /frl — Saída via ordem LIMIT (modo Maker) ──────────────────
                 elif cmd == "frl":
@@ -4165,6 +4291,35 @@ def duo_elite_loop() -> None:
                                 if fired: break
                         except Exception as e:
                             log.error("[OpD] %s: %s", _d_par, e)
+
+            # ── OPÇÃO E — ICT/SMC Institucional 15m (BTC/ETH/SOL) ──────────
+            if _mode_ope and not fired:
+                with _duo_lock:
+                    em_trade = _duo_in_trade
+                if not em_trade:
+                    for _e_inst, _e_par in [
+                        ("BTC-USDT-SWAP", "BTC"),
+                        (DUO_ETH,         "ETH"),
+                        (DUO_SOL,         "SOL"),
+                    ]:
+                        try:
+                            _df15 = okx_candles(_e_inst, bar="15m", limit=100)
+                            sig = signal_ict_fvg(_df15)
+                            if sig:
+                                _v4    = _df15.iloc[-5]
+                                _sl_px = float(_v4["high"]) if sig == "sell" else float(_v4["low"])
+                                dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                                log.info("[OpE] ICT FVG %s → %s | SL %.5f", _e_par, sig.upper(), _sl_px)
+                                tg(f"🏦 <b>OpE: ICT/SMC SETUP 15m</b>\n"
+                                   f"Par: <code>{_e_inst}</code> | {dir_scout}\n"
+                                   f"Sweep + FVG + Pullback ao gap\n"
+                                   f"SL estrutural: <code>{_sl_px:.5f}</code> (vela sweep)")
+                                fired = _fire(_e_inst, sig,
+                                              f"OpE ICT {_e_par}", tag=f"🏦 OpE {_e_par}",
+                                              sl_px_override=_sl_px, min_trail_pct=0.8)
+                                if fired: break
+                        except Exception as e:
+                            log.error("[OpE] %s: %s", _e_par, e)
 
         except Exception as e:
             log.error("loop: %s", e)
