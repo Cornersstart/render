@@ -1069,7 +1069,7 @@ def _get_real_exit(inst_id: str) -> tuple[float, float]:
 def _monitor(inst_id: str, pos_side: str, side: str,
              entry: float, sl_px: float, activate_px: float,
              sym: str, dir_txt: str, bal: float, qty: int,
-             tag: str = "DUO ELITE", armadilha: bool = False,
+             tag: str = "DUO ELITE",
              min_trail_pct: float = 0.0, fast_trail: bool = False) -> None:
     global _duo_in_trade, _duo_cooldown_until
     log.info("📡 SENTINELA [%s] %s %s | SL=%.5f | Trailing activa a %.5f | STEP TRAIL V5",
@@ -1125,117 +1125,69 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                         log.error("circuit breaker close fail %s: %s", sym, e)
                     continue
 
-            # ── GESTÃO DE POSIÇÃO (armadilha SAR M15 | Step Trail V5) ──────────
+            # ── GESTÃO DE POSIÇÃO (Step Trail V5 / Fast Trail) ───────────────────
             if pos is not None:
                 upl     = float(pos.get("upl",    0) or 0)
                 mark_px = float(pos.get("markPx", 0) or 0)
                 avg_px  = float(pos.get("avgPx",  entry) or entry)
                 pos_sz  = int(float(pos.get("pos", qty) or qty))
 
-                if armadilha:
-                    # ── SAR M15 TRAILING — Armadilha V10 ─────────────────────
-                    sar15 = _get_sar_m15_px(inst_id)
-                    if sar15 > 0 and mark_px > 0:
-                        sar_inv = ((side == "buy"  and sar15 > mark_px) or
-                                   (side == "sell" and sar15 < mark_px))
-                        if sar_inv:
-                            log.info("🪤 SAR M15 inverteu %s — fechando", sym)
-                            try:
-                                cancel_all_open_orders(inst_id); time.sleep(0.5)
-                                okx_close_market(inst_id, pos_side, pos_sz)
-                                tg(f"🪤 <b>ARMADILHA — SAR M15 INVERTEU</b>\n"
-                                   f"Par: <code>{sym}</code> | {dir_txt}\n"
-                                   f"P&L: <b>${upl:+.2f}</b> USDT | SAR M15 cruzou o preço")
-                                with _duo_lock:
-                                    _duo_in_trade       = False
-                                    _duo_cooldown_until = time.time() + DUO_COOLDOWN
-                            except Exception as e:
-                                log.error("SAR M15 close: %s", e)
-                            return
-                        else:
-                            # Ratchet SL ao SAR M15 (só avança a favor)
-                            if ((side == "buy"  and sar15 > sl_px and sar15 < mark_px) or
-                                (side == "sell" and sar15 < sl_px and sar15 > mark_px)):
-                                try:
-                                    clear_garbage(inst_id, pos_side); time.sleep(0.5)
-                                    okx_initial_sl(inst_id, pos_side, pos_sz, sar15)
-                                    log.info("🪤 SAR M15 ratchet %s: SL %.5f→%.5f",
-                                             sym, sl_px, sar15)
-                                    sl_px = sar15
-                                except Exception as e:
-                                    log.warning("SAR M15 ratchet: %s", e)
-                    # Alvo: banda H1 oposta
-                    if mark_px > 0 and _h1_band_opposite(inst_id, side):
-                        log.info("🎯 %s banda H1 oposta — tomando lucro armadilha", sym)
+                if fast_trail:
+                    # ── FAST TRAIL: break-even a +0.5%, trailing 0.2% ────────
+                    _pct_g = (((mark_px - avg_px) / avg_px * 100) if side == "buy"
+                              else ((avg_px - mark_px) / avg_px * 100)) if avg_px > 0 else 0.0
+                    if not _fast_be_done and _pct_g >= 0.5:
                         try:
-                            cancel_all_open_orders(inst_id); time.sleep(0.5)
-                            okx_close_market(inst_id, pos_side, pos_sz)
-                            tg(f"🎯 <b>ARMADILHA — ALVO H1 ATINGIDO</b>\n"
+                            clear_garbage(inst_id, pos_side); time.sleep(0.5)
+                            okx_initial_sl(inst_id, pos_side, pos_sz, avg_px)
+                            okx_trailing_stop(inst_id, pos_side, pos_sz,
+                                              avg_px * (1.005 if side == "buy" else 0.995),
+                                              callback=0.002)
+                            _fast_be_done = True
+                            log.info("🔒 FAST TRAIL: Break-Even @ +%.2f%% — SL=%.5f", _pct_g, avg_px)
+                            tg(f"🔒 <b>FAST TRAIL: BREAK-EVEN</b>\n"
                                f"Par: <code>{sym}</code> | {dir_txt}\n"
-                               f"P&L: <b>${upl:+.2f}</b> USDT 🏆 | Banda H1 oposta tocada")
-                            with _duo_lock:
-                                _duo_in_trade       = False
-                                _duo_cooldown_until = time.time() + DUO_COOLDOWN
+                               f"💰 Lucro +{_pct_g:.2f}% | SL → entry <code>{avg_px:.5f}</code>\n"
+                               f"📡 Trailing 0.2% activo")
                         except Exception as e:
-                            log.error("H1 alvo close: %s", e)
-                        return
+                            log.error("fast trail break-even: %s", e)
                 else:
-                    if fast_trail:
-                        # ── FAST TRAIL: break-even a +0.5%, trailing 0.2% ────
+                    # ── STEP TRAIL V5 (modo normal) ──────────────────────────
+                    if _step_trail_tier < len(STEP_TRAIL_LEVELS) and mark_px > 0 and avg_px > 0:
+                        trigger_usd, lock_usd = STEP_TRAIL_LEVELS[_step_trail_tier]
                         _pct_g = (((mark_px - avg_px) / avg_px * 100) if side == "buy"
                                   else ((avg_px - mark_px) / avg_px * 100)) if avg_px > 0 else 0.0
-                        if not _fast_be_done and _pct_g >= 0.5:
+                        if min_trail_pct > 0.0 and _pct_g < min_trail_pct:
+                            pass  # aguarda lucro mínimo antes de activar step trail
+                        elif upl >= trigger_usd:
+                            if side == "buy":
+                                price_move = mark_px - avg_px
+                                lock_px    = avg_px + lock_usd * (price_move / upl)
+                            else:
+                                price_move = avg_px - mark_px
+                                lock_px    = avg_px - lock_usd * (price_move / upl)
+                            grau = _step_trail_tier + 1
+                            log.info("🔒 STEP TRAIL GRAU %d — $%.0f atingido | %s SL=%.5f",
+                                     grau, trigger_usd, sym, lock_px)
                             try:
                                 clear_garbage(inst_id, pos_side); time.sleep(0.5)
-                                okx_initial_sl(inst_id, pos_side, pos_sz, avg_px)
+                                okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
                                 okx_trailing_stop(inst_id, pos_side, pos_sz,
-                                                  avg_px * (1.005 if side == "buy" else 0.995),
-                                                  callback=0.002)
-                                _fast_be_done = True
-                                log.info("🔒 FAST TRAIL: Break-Even @ +%.2f%% — SL=%.5f", _pct_g, avg_px)
-                                tg(f"🔒 <b>FAST TRAIL: BREAK-EVEN</b>\n"
+                                                  mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy"
+                                                  else mark_px * (1 - TRAIL_ACTIVATE_PCT/100))
+                                _step_trail_tier += 1
+                                grau_bar = "🟢" * grau + "⚪" * (len(STEP_TRAIL_LEVELS) - grau)
+                                prox_txt = (
+                                    f"Próximo grau: +${STEP_TRAIL_LEVELS[_step_trail_tier][0]:.0f} → piso +${STEP_TRAIL_LEVELS[_step_trail_tier][1]:.0f}"
+                                    if _step_trail_tier < len(STEP_TRAIL_LEVELS) else "🏆 GRAU MÁXIMO ATINGIDO!"
+                                )
+                                tg(f"🔒 <b>STEP TRAIL GRAU {grau}/5</b> {grau_bar}\n"
                                    f"Par: <code>{sym}</code> | {dir_txt}\n"
-                                   f"💰 Lucro +{_pct_g:.2f}% | SL → entry <code>{avg_px:.5f}</code>\n"
-                                   f"📡 Trailing 0.2% activo")
+                                   f"💰 Lucro actual: <b>${upl:+.2f}</b> → SL: <b>+${lock_usd:.0f}</b>\n"
+                                   f"📍 SL price: <code>{lock_px:.5f}</code>\n"
+                                   f"📡 {prox_txt}")
                             except Exception as e:
-                                log.error("fast trail break-even: %s", e)
-                    else:
-                        # ── STEP TRAIL V5 (modo normal) ───────────────────────
-                        if _step_trail_tier < len(STEP_TRAIL_LEVELS) and mark_px > 0 and avg_px > 0:
-                            trigger_usd, lock_usd = STEP_TRAIL_LEVELS[_step_trail_tier]
-                            _pct_g = (((mark_px - avg_px) / avg_px * 100) if side == "buy"
-                                      else ((avg_px - mark_px) / avg_px * 100)) if avg_px > 0 else 0.0
-                            if min_trail_pct > 0.0 and _pct_g < min_trail_pct:
-                                pass  # aguarda lucro mínimo antes de activar step trail
-                            elif upl >= trigger_usd:
-                                if side == "buy":
-                                    price_move = mark_px - avg_px
-                                    lock_px    = avg_px + lock_usd * (price_move / upl)
-                                else:
-                                    price_move = avg_px - mark_px
-                                    lock_px    = avg_px - lock_usd * (price_move / upl)
-                                grau = _step_trail_tier + 1
-                                log.info("🔒 STEP TRAIL GRAU %d — $%.0f atingido | %s SL=%.5f",
-                                         grau, trigger_usd, sym, lock_px)
-                                try:
-                                    clear_garbage(inst_id, pos_side); time.sleep(0.5)
-                                    okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
-                                    okx_trailing_stop(inst_id, pos_side, pos_sz,
-                                                      mark_px * (1 + TRAIL_ACTIVATE_PCT/100) if side == "buy"
-                                                      else mark_px * (1 - TRAIL_ACTIVATE_PCT/100))
-                                    _step_trail_tier += 1
-                                    grau_bar = "🟢" * grau + "⚪" * (len(STEP_TRAIL_LEVELS) - grau)
-                                    prox_txt = (
-                                        f"Próximo grau: +${STEP_TRAIL_LEVELS[_step_trail_tier][0]:.0f} → piso +${STEP_TRAIL_LEVELS[_step_trail_tier][1]:.0f}"
-                                        if _step_trail_tier < len(STEP_TRAIL_LEVELS) else "🏆 GRAU MÁXIMO ATINGIDO!"
-                                    )
-                                    tg(f"🔒 <b>STEP TRAIL GRAU {grau}/5</b> {grau_bar}\n"
-                                       f"Par: <code>{sym}</code> | {dir_txt}\n"
-                                       f"💰 Lucro actual: <b>${upl:+.2f}</b> → SL: <b>+${lock_usd:.0f}</b>\n"
-                                       f"📍 SL price: <code>{lock_px:.5f}</code>\n"
-                                       f"📡 {prox_txt}")
-                                except Exception as e:
-                                    log.error("step trail grau %d: %s", grau, e)
+                                log.error("step trail grau %d: %s", grau, e)
 
                 _none_streak = 0
                 continue
@@ -1569,7 +1521,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
 
     threading.Thread(target=_monitor,
         args=(inst_id, ps, side, avg, sl_px, activate_px, sym, dir_txt, bal, qty),
-        kwargs={"tag": tag, "armadilha": (_armadilha_mode or _trail_mode == "gv6"),
+        kwargs={"tag": tag,
                 "min_trail_pct": min_trail_pct, "fast_trail": fast_trail},
         daemon=True, name=f"mon_{sym}").start()
     return True
