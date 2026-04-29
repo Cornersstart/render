@@ -8,7 +8,7 @@ Doutrina : ONE TARGET, ONE KILL  |  STEP TRAIL V5 = LAW
 ⚡ OpD   — Sniper MACD M5                   ETH only
 🏦 OpE   — SMC/ICT M15                      ETH/BTC/SOL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CB: PnL nominal ≤ -$50  |  SL 1.5%  |  RISK_FRAC 0.98
+CB: PnL nominal ≤ -$50  |  SL 1.5%  |  Reserva $30 fixa
 5× Isolated ALL-IN  |  OKX Perpetual SWAP (hedge mode)
 """
 
@@ -48,7 +48,7 @@ TELEGRAM_CHAT  = os.environ.get("CHAT_ID",
 
 OKX_BASE  = "https://www.okx.com/api/v5"
 LEVERAGE  = 5          # alavancagem operacional — alterável via /subir6x /subir7x
-RISK_FRAC = 0.98   # 98% para margem de taxas (All-In seguro)
+FEE_RESERVE_USD = 30.0  # reserva fixa $30 para taxas open/close/funding
 
 # ── DUO DE ELITE ───────────────────────────────────────────────────────────────
 DUO_SL_PCT          = 1.2    # SL inicial (protecção antes do trailing activar)
@@ -206,7 +206,7 @@ def okx_candles(inst_id: str, bar: str = "15m", limit: int = 300) -> pd.DataFram
 
 # ── OKX — saldo ───────────────────────────────────────────────────────────────
 def okx_balance() -> float | None:
-    """Saldo USDT DISPONÍVEL (free margin) — usado para calcular qty da próxima ordem."""
+    """Equity disponível (availEq) USDT — base para calc_qty com reserva $30."""
     if not _has_creds(): return None
     path = "/api/v5/account/balance?ccy=USDT"
     try:
@@ -215,7 +215,7 @@ def okx_balance() -> float | None:
         if d.get("code") != "0": return None
         details = d["data"][0].get("details", [])
         usdt = next((x for x in details if x["ccy"] == "USDT"), None)
-        return float(usdt["availBal"]) if usdt else 0.0
+        return float(usdt["availEq"]) if usdt else 0.0
     except Exception as e:
         log.warning("balance: %s", e)
         return None
@@ -333,16 +333,14 @@ def okx_lot_size(inst_id: str) -> float:
         pass
     return 1.0
 
-# ── Margem de segurança ALL-IN ────────────────────────────────────────────────
-# 3% reservado: cobre taker fee open+close (0.05%×2 × 5x notional = 0.5% bal),
-# slippage de market order, e qualquer drift do availBal reportado pela OKX
-# entre o /balance e o /trade/order. Evita sCode=51008 (Insufficient Margin).
-SAFETY_MARGIN = 0.97
+# ── Cálculo de contratos ALL-IN com reserva fixa $30 ────────────────────────
+# usable = availEq - $30  → cobre taker fee open+close, slippage e funding.
+# Evita sCode=51008 (Insufficient Margin) sem desperdiçar margem em %.
 
 def calc_qty(inst_id: str, price: float, balance: float) -> int:
     ct_val = okx_lot_size(inst_id)
-    safe_balance = balance * SAFETY_MARGIN
-    return max(1, int(safe_balance * RISK_FRAC * LEVERAGE / (price * ct_val)))
+    usable = max(0.0, balance - FEE_RESERVE_USD)
+    return max(1, int(usable * LEVERAGE / (price * ct_val)))
 
 # ── OKX — market order ────────────────────────────────────────────────────────
 _SIDE_PS = {"buy": "long", "sell": "short"}
@@ -1834,7 +1832,7 @@ _FORCE_MAP = {
 def cmd_force(coin: str) -> str:
     """Abre ordem de mercado IGNORANDO filtros de estratégia.
     Direcção decidida por RSI 15m: > 50 → LONG  |  < 50 → SHORT.
-    Usa LEVERAGE=5x e SAFETY_MARGIN=3% (mesma config do bot)."""
+    Usa LEVERAGE=5x e reserva fixa $30 (mesma config do bot)."""
     if not _has_creds(): return "❌ Sem credenciais OKX."
     coin = coin.lower().strip()
     if coin not in _FORCE_MAP:
