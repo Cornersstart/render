@@ -1,29 +1,15 @@
 """
-TradeSniper Bot — V9 FULL SQUAD + FVG EXPANSION + GOLDEN RECOVERY DOCTRINE + STEP TRAIL V5
-BUILD: 2026-04-19 — V9: FVG SOL/BNB/ETH adicionados | Step Trail V5 | SL HOLD 5% | Margin 3%
+TradeSniper Bot — V11 SNIPER ELITE (OPERAÇÃO PURGE)
+BUILD: 2026-04-29 — Purge total: só squads activos, sem legacy
 Doutrina : ONE TARGET, ONE KILL  |  STEP TRAIL V5 = LAW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏆 GOLDEN DOCTRINE (backtest 103 dias — actualizada Abr/2026):
-  🥇 POL — E09 ICHIMOKU 1H V2         (5 filtros anti-falso, reforçado Abr/2026) HOLD
-  🌊 SOL — E06 SUPERTREND 15m         (95.0% hit, +$515 líq.)    HOLD
+🥇 POL   — GOLDEN (Ichimoku 1H)             HOLD
+🪤 OpA   — Armadilha Triple BB+SAR          SOL/BNB/ETH/DOGE
+⚡ OpD   — Sniper MACD M5                   ETH only
+🏦 OpE   — SMC/ICT M15                      ETH/BTC/SOL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆕 FVG EXPANSION SQUAD (backtest 90 dias — adicionado V9):
-  🔷 SOL — E10 FAIR VALUE GAP 15m     (70.6% hit, ROI +70.4%)    HOLD
-  🔷 BNB — E11 FAIR VALUE GAP 15m     (65.2% hit, ROI +48.8%)    HOLD
-  🔷 ETH — E12 FAIR VALUE GAP 15m     (73.9% hit, ROI +34.9%)    HOLD
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-LEGACY SQUAD (mantido como rede):
-  💧 ETH — VWAP KISS M15                                          HOLD
-  🔥 SOL — ENGOLFO M15  (extra trigger)                           HOLD
-  🛡️ ADA — ORDER BLOCK 1H                                         STRICT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOLD pairs (POL/ETH/SOL/BNB): sem SL apertado, só circuit breaker -4%
-STRICT pairs (ADA/DOGE): SL fixo 1.5% — backtest mostra ruína se segurar
-GLOBAL CIRCUIT BREAKER: -4% drawdown = fecho imediato (protege banca $900)
-Trailing +0.8% cb 1% | 5× Isolated ALL-IN | OKX Perpetual SWAP (hedge mode)
-FVG: gap entre high[i-2] e low[i] (bullish) ou low[i-2] e high[i] (bearish)
-     entrada no retorno ao midpoint ±0.3% | EMA200 + RSI 35-65 obrigatórios
-     gap expira após FVG_GAP_EXPIRY velas sem retorno (evita entradas stale)
+CB: PnL nominal ≤ -$50  |  SL 1.5%  |  RISK_FRAC 0.98
+5× Isolated ALL-IN  |  OKX Perpetual SWAP (hedge mode)
 """
 
 import base64
@@ -62,7 +48,7 @@ TELEGRAM_CHAT  = os.environ.get("CHAT_ID",
 
 OKX_BASE  = "https://www.okx.com/api/v5"
 LEVERAGE  = 5          # alavancagem operacional — alterável via /subir6x /subir7x
-RISK_FRAC = 1.0    # ALL-IN
+RISK_FRAC = 0.98   # 98% para margem de taxas (All-In seguro)
 
 # ── DUO DE ELITE ───────────────────────────────────────────────────────────────
 DUO_SL_PCT          = 1.2    # SL inicial (protecção antes do trailing activar)
@@ -77,33 +63,15 @@ RSI2_SHORT_MIN      = 55     # RSI(2) mínimo para entrada SHORT (spike moderado
 BB_PERIOD    = 20    # Bollinger Bands: período da SMA
 BB_STD       = 2.0   # desvios padrão da banda
 BB_TOL_PCT   = 0.5   # % de tolerância para "toque" na banda
-SCALP_SL_PCT  = 1.0    # SL fixo para scalp de reversão Bollinger
-TSAR_SL_PCT   = 2.0    # TSAR V11 hard stop-loss 2%
-TSAR_LOCK_USD = 30.0   # lucro que activa lock + SAR M15 trailing
-TSAR_COOLDOWN = 900    # 15 min cooldown após TSAR trade (Modo Combate)
-# GV5 — 5 graus de lock crescente: (trigger_usd, lock_usd)
-TSAR_GV5: list[tuple[float, float]] = [
-    (30.0,  25.0),   # G1: hit +$30  → piso +$25
-    (50.0,  35.0),   # G2: hit +$50  → piso +$35
-    (75.0,  55.0),   # G3: hit +$75  → piso +$55
-    (100.0, 75.0),   # G4: hit +$100 → piso +$75
-    (150.0, 110.0),  # G5: hit +$150 → piso +$110 + runner SAR M15
-]
+SCALP_SL_PCT  = 1.0    # SL fixo para scalp de reversão Bollinger (OpA)
 
 DUO_ETH    = "ETH-USDT-SWAP"
 DUO_SOL    = "SOL-USDT-SWAP"
-SHIELD_ADA = "ADA-USDT-SWAP"
 GOLD_POL   = "POL-USDT-SWAP"      # 🥇 Golden pair — Ichimoku 1H exclusivo
-GOLD_DOGE  = "DOGE-USDT-SWAP"     # incluído na lista STRICT (regra de hold)
-FVG_BNB    = "BNB-USDT-SWAP"      # 🆕 V9 — FVG expansion squad
-ALL_SYMS   = [DUO_ETH, DUO_SOL, SHIELD_ADA, GOLD_POL, GOLD_DOGE, FVG_BNB]
+GOLD_DOGE  = "DOGE-USDT-SWAP"     # 🪤 OpA Armadilha
+FVG_BNB    = "BNB-USDT-SWAP"      # 🪤 OpA Armadilha
+ALL_SYMS   = [DUO_ETH, DUO_SOL, GOLD_POL, GOLD_DOGE, FVG_BNB]
 
-# ── ORDER BLOCK DEFENSE (ADA — 1H) ───────────────────────────────────────────
-OB_LOOKBACK    = 20    # velas 1H para procurar blocos de ordem
-OB_VOL_MULT    = 2.0   # volume do expansion candle ≥ 2× média
-OB_BODY_MULT   = 1.5   # corpo do expansion candle ≥ 1.5× média
-OB_TOL_PCT     = 0.4   # tolerância ±0.4% para toque no midpoint
-OB_SL_PCT      = 1.0   # SL da estratégia OB (diferente do DUO)
 
 # ── STEP TRAILING V5 — 5 graus baseados em PnL não realizado (USDT) ───────────
 # Cada tuple: (trigger_usd, lock_usd) — ao atingir trigger, SL sobe para lock
@@ -118,43 +86,20 @@ STEP_TRAIL_LEVELS: list[tuple[float, float]] = [
 # ══════════════════════════════════════════════════════════════════════════════
 # GOLDEN RECOVERY DOCTRINE — regras de hold por par (Abr/2026)
 # ══════════════════════════════════════════════════════════════════════════════
-HOLD_PAIRS    = {GOLD_POL, DUO_ETH, DUO_SOL, FVG_BNB}    # sem SL apertado
-STRICT_PAIRS  = {SHIELD_ADA, GOLD_DOGE}                  # SL fixo 1.5%
+HOLD_PAIRS    = {GOLD_POL, DUO_ETH, DUO_SOL, FVG_BNB, GOLD_DOGE}
+STRICT_PAIRS  = set()   # todos os squads usam sl_pct explícito
 STRICT_SL_PCT = 1.5
-# HOLD: SL na corretora é REDE DE SEGURANÇA (caso o bot/monitor caia).
-# O controlo primário é o CIRCUIT_BREAKER no monitor (4.0%) — dispara primeiro.
-# Folga de 1pp evita corrida dupla CB-vs-exchange-SL no mesmo tick.
 HOLD_SL_PCT   = 5.0
-CIRCUIT_BREAKER_PCT = 2.0   # global — monitor fecha SEMPRE a -2% em preço
+CIRCUIT_BREAKER_USD = 50.0   # circuit breaker — fecha se PnL nominal ≤ -$50
 PROFIT_LOCK_USD     = 0.0   # 0 = desactivado — Step Trail V5 trata dos lucros
-
-# ── E06 SUPERTREND (SOL 15m) ──────────────────────────────────────────────────
-ST_PERIOD = 10
-ST_MULT   = 3.0
-
-# ── E07 RSI DIVERGENCE + VWAP (XRP 15m) ───────────────────────────────────────
-RSI_DIV_LOOKBACK = 30      # janela para detectar divergência
-RSI_DIV_MIN_GAP  = 5       # diferença mínima entre topos/fundos do RSI
 
 # ── E09 ICHIMOKU CLOUD (POL 1H) ──────────────────────────────────────────────
 ICHI_TENKAN  = 9
 ICHI_KIJUN   = 26
 ICHI_SENKOU  = 52
 
-# ── E10/E11/E12 FAIR VALUE GAP — SOL / BNB / ETH 15m ─────────────────────────
-# FVG: gap de liquidez criado por vela de impulso forte entre candles [i-2] e [i]
-#   Bullish FVG: high[i-2] < low[i]  → gap acima (SOL/BNB/ETH só acima da EMA200)
-#   Bearish FVG: low[i-2]  > high[i] → gap abaixo (só abaixo da EMA200)
-# Entrada: retorno do preço ao midpoint do gap (±FVG_TOL_PCT%)
-# Expiração: gap descartado após FVG_GAP_EXPIRY velas sem retorno (sinal stale)
-FVG_TOL_PCT    = 0.3   # tolerância ±0.3% ao midpoint do gap
-FVG_GAP_EXPIRY = 40    # máximo de velas aguardando retorno (≈10h em 15m)
-FVG_BODY_MULT  = 1.0   # impulso: corpo da vela central ≥ 1× média20 (filtro de qualidade)
-
 # ── DISCIPLINA DE SNIPER ──────────────────────────────────────────────────────
-LOCKDOWN_SECS    = 300   # 5 min — menos bloqueio entre sinais legítimos
-VWAP_BODY_MIN    = 0.55  # corpo/range mínimo para confirmar VWAP KISS (era 0.40)
-VWAP_DIST_PCT    = 0.15  # distância mínima da VWAP após cross (em %)
+LOCKDOWN_SECS    = 300   # 5 min — cooldown entre sinais
 
 # ── Estado global ─────────────────────────────────────────────────────────────
 _duo_in_trade:       bool  = False
@@ -164,11 +109,8 @@ _duo_lock                  = threading.Lock()
 
 _bot_authorized: bool = True
 _auth_lock             = threading.Lock()
-_armadilha_mode: bool  = False   # False = off | True = Bollinger mean-reversion activo
+_armadilha_mode: bool  = False   # False = off | True = OpA Triple BB+SAR activo
 _trail_mode: str       = "gv5"   # "gv5" = Step Trail V5 | "gv6" = SAR M15 trailing
-_tsar_mode: str        = "on"    # "on" = activo por defeito | "" = off | "paused" = sem novas entradas
-_tsar_pol_mode: str    = "on"    # POL SNIPER TSAR | "on" = activo | "" = off | "paused" = sem novas entradas
-_tsar_combat_grau: int = 0       # grau GV5 activo na posição TSAR corrente (0 = nenhum)
 
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
@@ -179,16 +121,12 @@ MONTHLY_GOAL_USD = 600.0
 
 # ── Panic pause ────────────────────────────────────────────────────────────
 _panic_until: float = 0.0
-_btc_sentinel_active: bool = True
-_mode_opb: bool = False   # Opção B — PA independentes (ETH/SOL/BNB/POL)
-_mode_opc: bool = False   # Opção C — híbrido TSAR+PA: 5× se TSAR confirma, 3× só PA
-_mode_opd: bool = False   # Opção D — Sniper MACD M5 (ETH/SOL/POL)
-_mode_ope: bool = False   # Opção E — ICT/SMC Institucional 15m (BTC/ETH/SOL)
+_mode_opd: bool = False   # OpD — Sniper MACD M5 (ETH)
+_mode_ope: bool = False   # OpE — ICT/SMC Institucional 15m (BTC/ETH/SOL)
 
 # ── Estratégias habilitadas — /pausar /activar individuais ───────────────────
-_STRATEGY_KEYS = ("ichimoku", "supertrend", "rsidiv", "vwap", "engolfo", "ob", "fvg")
-# ICHIMOKU e FVG OFF por defeito — activar manualmente via /activar
-_strategy_enabled: dict[str, bool] = {k: (k not in ("ichimoku", "fvg")) for k in _STRATEGY_KEYS}
+_STRATEGY_KEYS = ("ichimoku",)
+_strategy_enabled: dict[str, bool] = {"ichimoku": True}
 _strategy_lock = threading.Lock()
 
 STATE_FILE = Path(__file__).parent / "bot_state.json"
@@ -200,12 +138,9 @@ def _save_state(authorized: bool) -> None:
         with _strategy_lock:
             st_snap = dict(_strategy_enabled)
         tmp.write_text(json.dumps({
-            "authorized":       authorized,
-            "tsar_mode":        _tsar_mode,
-            "tsar_pol_mode":    _tsar_pol_mode,
-            "trail_mode":       _trail_mode,
-            "strategy_enabled": st_snap,
-            "updatedAt":        datetime.now(timezone.utc).isoformat(),
+            "authorized":  authorized,
+            "trail_mode":  _trail_mode,
+            "updatedAt":   datetime.now(timezone.utc).isoformat(),
         }, indent=2))
         tmp.replace(STATE_FILE)
     except Exception as e:
@@ -220,25 +155,16 @@ def _load_state() -> bool:
     return True
 
 def _load_full_state() -> None:
-    """Restaura authorized + tsar_mode + tsar_pol_mode + trail_mode + strategy_enabled do ficheiro de estado."""
-    global _tsar_mode, _tsar_pol_mode, _trail_mode
+    """Restaura authorized + trail_mode + strategy_enabled do ficheiro de estado."""
+    global _trail_mode
     try:
         if STATE_FILE.exists():
             data = json.loads(STATE_FILE.read_text())
             with _auth_lock:
                 globals()["_bot_authorized"] = bool(data.get("authorized", True))
-            _tsar_mode     = data.get("tsar_mode",     "on")
-            _tsar_pol_mode = data.get("tsar_pol_mode", "on")
-            _trail_mode    = data.get("trail_mode", "gv5")
-            saved_st = data.get("strategy_enabled", {})
-            if saved_st:
-                with _strategy_lock:
-                    for k in _STRATEGY_KEYS:
-                        if k in saved_st:
-                            _strategy_enabled[k] = bool(saved_st[k])
-            log.info("Estado restaurado: auth=%s tsar=%r trail=%s st=%s",
-                     globals()["_bot_authorized"], _tsar_mode, _trail_mode,
-                     {k: v for k, v in _strategy_enabled.items()})
+            _trail_mode = data.get("trail_mode", "gv5")
+            log.info("Estado restaurado: auth=%s trail=%s",
+                     globals()["_bot_authorized"], _trail_mode)
     except Exception as e:
         log.warning("_load_full_state: %s", e)
 
@@ -334,9 +260,14 @@ def okx_any_position_open(syms: list[str]) -> tuple[str, str] | None:
     """
     if not _has_creds(): return None
     for sym in syms:
-        for ps in ("long", "short"):
-            if okx_has_position(sym, ps):
-                return (sym, ps)
+        path = f"/api/v5/account/positions?instType=SWAP&instId={sym}"
+        try:
+            r = requests.get(f"https://www.okx.com{path}", headers=_headers("GET", path), timeout=8)
+            for pos in r.json().get("data", []):
+                if float(pos.get("pos", 0) or 0) >= 1:
+                    return (sym, pos.get("posSide", "long"))
+        except Exception as e:
+            log.warning("any_position_open %s: %s", sym, e)
     return None
 
 def okx_get_position(inst_id: str, pos_side: str) -> dict | None:
@@ -713,165 +644,8 @@ def tg(msg: str, chat_id: str | int | None = None) -> None:
         log.warning("tg: %s", e)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SINAIS
+# SINAIS — SQUADS ACTIVOS
 # ══════════════════════════════════════════════════════════════════════════════
-
-def vwap_kiss_signal(df: pd.DataFrame) -> str | None:
-    """VWAP KISS — ETH M15 (DISCIPLINA REFORÇADA — anti ping-pong).
-
-    Confirmações exigidas (todas obrigatórias):
-      1. Cross da VWAP diária na vela anterior (cur cruza, prv estava do outro lado)
-      2. Vela com corpo >= VWAP_BODY_MIN (55%) do range total
-      3. Distância mínima de VWAP_DIST_PCT (0.15%) entre close e VWAP após o cross
-      4. PRV-2 (vela anterior à do cruce) também estava do mesmo lado da VWAP que prv
-         → evita reversões de uma única vela ("limpa" volatilidade rápida)
-      5. EMA200 alinhada com a direcção (LONG só acima, SHORT só abaixo)
-      6. RSI mais apertado: LONG 45–65 / SHORT 35–55
-    """
-    if len(df) < 210: return None
-    df = df.copy()
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["date"]   = df.index.date
-    df["tp"]     = (df["high"] + df["low"] + df["close"]) / 3
-    df["tpvol"]  = df["tp"] * df["vol"]
-    df["cvtpv"]  = df.groupby("date")["tpvol"].cumsum()
-    df["cvol"]   = df.groupby("date")["vol"].cumsum()
-    df["vwap"]   = df["cvtpv"] / df["cvol"]
-    df["rsi"]    = ta.rsi(df["close"], length=14)
-
-    cur, prv, prv2 = df.iloc[-2], df.iloc[-3], df.iloc[-4]
-    if any(pd.isna(x) for x in [cur["vwap"], cur["rsi"], cur["ema200"], prv2["vwap"]]):
-        return None
-
-    ema200 = cur["ema200"]
-    price  = cur["close"]
-    vwap   = cur["vwap"]
-    rng    = cur["high"] - cur["low"]
-    body   = abs(cur["close"] - cur["open"])
-    rsi    = cur["rsi"]
-
-    # 1) Corpo forte (≥55%)
-    if rng <= 0 or body / rng < VWAP_BODY_MIN:
-        return None
-
-    # 2) Distância mínima de VWAP após cross (em %)
-    dist_pct = abs(price - vwap) / vwap * 100
-    if dist_pct < VWAP_DIST_PCT:
-        return None
-
-    # 3) Cross com confirmação prv-2 (3 velas: prv2/prv abaixo + cur acima = LONG, e vice-versa)
-    up   = prv2["close"] < prv2["vwap"] and prv["close"] < prv["vwap"] and cur["close"] > cur["vwap"]
-    down = prv2["close"] > prv2["vwap"] and prv["close"] > prv["vwap"] and cur["close"] < cur["vwap"]
-
-    # 4) Direccionalidade da vela + EMA200 + RSI apertado
-    if up   and cur["close"] > cur["open"] and 45 <= rsi <= 65 and price > ema200: return "buy"
-    if down and cur["close"] < cur["open"] and 35 <= rsi <= 55 and price < ema200: return "sell"
-    return None
-
-def engolfo_signal(df: pd.DataFrame) -> str | None:
-    """ENGOLFO — SOL M15: engolfo corpo + volume 1.3× + RSI + corpo mínimo + EMA200."""
-    if len(df) < 210: return None
-    df = df.copy()
-    # ── Filtro de tendência macro: EMA200 ──────────────────────────────────────
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["rsi"]   = ta.rsi(df["close"], length=14)
-    cur, prv = df.iloc[-2], df.iloc[-3]
-    if pd.isna(cur["ema200"]) or pd.isna(cur["rsi"]): return None
-    ema200 = cur["ema200"]
-    price  = cur["close"]
-    rsi    = cur["rsi"]
-    # ── Filtro de corpo mínimo: ≥ 0.25% do preço (candle com força real) ──────
-    body = abs(cur["close"] - cur["open"])
-    if body < price * 0.0025: return None
-    # ── Volume ≥ 1.3× média 20 velas ──────────────────────────────────────────
-    vol_avg = df["vol"].iloc[-22:-2].mean()
-    if not (vol_avg > 0 and cur["vol"] >= vol_avg * 1.3): return None
-    # ── Padrão de engolfo (corpo a corpo) ─────────────────────────────────────
-    pb_top = max(prv["open"], prv["close"]); pb_bot = min(prv["open"], prv["close"])
-    rb_top = max(cur["open"], cur["close"]); rb_bot = min(cur["open"], cur["close"])
-    bull = prv["close"] < prv["open"] and cur["close"] > cur["open"] and rb_bot <= pb_bot and rb_top >= pb_top
-    bear = prv["close"] > prv["open"] and cur["close"] < cur["open"] and rb_bot <= pb_bot and rb_top >= pb_top
-    # LONG só acima EMA200 + RSI 40-65 | SHORT só abaixo EMA200 + RSI 35-60
-    if bull and price > ema200 and 40 <= rsi <= 65: return "buy"
-    if bear and price < ema200 and 35 <= rsi <= 60: return "sell"
-    return None
-
-# ══════════════════════════════════════════════════════════════════════════════
-# GOLDEN DOCTRINE STRATEGIES — E06 / E07 / E09
-# ══════════════════════════════════════════════════════════════════════════════
-
-def supertrend_signal(df: pd.DataFrame) -> str | None:
-    """🌊 E06 SUPERTREND — SOL 15m  (95% hit rate / hold the hand).
-
-    Dispara no FLIP do Supertrend (longo→curto vira para a outra direcção).
-    Filtros: EMA200 alinhada com a direcção; RSI 35–65 (evita extremos).
-    """
-    if len(df) < 210: return None
-    df = df.copy()
-    st = ta.supertrend(df["high"], df["low"], df["close"],
-                       length=ST_PERIOD, multiplier=ST_MULT)
-    if st is None or st.empty: return None
-    dir_col = next((c for c in st.columns if c.startswith("SUPERTd_")), None)
-    if dir_col is None: return None
-    df["st_dir"] = st[dir_col]
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["rsi"]    = ta.rsi(df["close"], length=14)
-
-    cur, prv = df.iloc[-2], df.iloc[-3]
-    if any(pd.isna(x) for x in [cur["st_dir"], prv["st_dir"], cur["ema200"], cur["rsi"]]):
-        return None
-    price, ema200, rsi = cur["close"], cur["ema200"], cur["rsi"]
-    if not (35 <= rsi <= 65): return None
-
-    # Flip de baixa→alta com EMA200 confirmando alta
-    if prv["st_dir"] == -1 and cur["st_dir"] == 1 and price > ema200:
-        return "buy"
-    # Flip de alta→baixa com EMA200 confirmando baixa
-    if prv["st_dir"] == 1 and cur["st_dir"] == -1 and price < ema200:
-        return "sell"
-    return None
-
-def rsi_div_vwap_signal(df: pd.DataFrame) -> str | None:
-    """🎯 E07 RSI DIVERGENCE + VWAP — XRP 15m  (PF 2.38 — alta convicção).
-
-    LONG : preço faz fundo MAIS BAIXO + RSI faz fundo MAIS ALTO  (bullish div)
-            + close acima da VWAP diária + RSI a sair de sobrevenda (<40 → >40).
-    SHORT: simétrico — preço topo mais alto + RSI topo mais baixo + close < VWAP.
-    """
-    if len(df) < max(RSI_DIV_LOOKBACK + 5, 50): return None
-    df = df.copy()
-    df["rsi"]   = ta.rsi(df["close"], length=14)
-    df["date"]  = df.index.date
-    df["tp"]    = (df["high"] + df["low"] + df["close"]) / 3
-    df["tpvol"] = df["tp"] * df["vol"]
-    df["vwap"]  = (df.groupby("date")["tpvol"].cumsum()
-                   / df.groupby("date")["vol"].cumsum())
-
-    cur, prv = df.iloc[-2], df.iloc[-3]
-    if any(pd.isna(x) for x in [cur["rsi"], cur["vwap"], prv["rsi"]]):
-        return None
-
-    window = df.iloc[-(RSI_DIV_LOOKBACK + 2):-2]
-    if window.empty: return None
-
-    # Bullish divergence: novo mínimo em preço, mínimo de RSI MAIS ALTO
-    p_low_idx  = window["low"].idxmin()
-    r_at_plow  = df.loc[p_low_idx, "rsi"]
-    if (cur["low"] < window["low"].min() * 0.999
-        and cur["rsi"] > r_at_plow + RSI_DIV_MIN_GAP
-        and cur["close"] > cur["vwap"]
-        and prv["rsi"] < 40 and cur["rsi"] >= 40):
-        return "buy"
-
-    # Bearish divergence: novo máximo em preço, máximo de RSI MAIS BAIXO
-    p_hi_idx   = window["high"].idxmax()
-    r_at_phi   = df.loc[p_hi_idx, "rsi"]
-    if (cur["high"] > window["high"].max() * 1.001
-        and cur["rsi"] < r_at_phi - RSI_DIV_MIN_GAP
-        and cur["close"] < cur["vwap"]
-        and prv["rsi"] > 60 and cur["rsi"] <= 60):
-        return "sell"
-    return None
 
 def ichimoku_signal(df: pd.DataFrame) -> str | None:
     """🥇 E09 ICHIMOKU CLOUD V2 — POL 1H  (reforçado Abr/2026).
@@ -992,61 +766,6 @@ def ichimoku_signal(df: pd.DataFrame) -> str | None:
     if short_ok: return "sell"
     return None
 
-def _ichimoku_cloud_dir(inst_id: str) -> str:
-    """Retorna 'bull' (preço acima da nuvem), 'bear' (abaixo) ou 'neutral'."""
-    try:
-        df = okx_candles(inst_id, bar="1H", limit=120)
-        TENKAN, KIJUN, SSB_P = 9, 26, 52
-        hi = lambda n: df["high"].rolling(n).max()
-        lo = lambda n: df["low"].rolling(n).min()
-        span_a = ((hi(TENKAN) + lo(TENKAN)) / 2 + (hi(KIJUN) + lo(KIJUN)) / 2) / 2
-        span_b = (hi(SSB_P) + lo(SSB_P)) / 2
-        kumo_top = max(float(span_a.iloc[-27]), float(span_b.iloc[-27]))
-        kumo_bot = min(float(span_a.iloc[-27]), float(span_b.iloc[-27]))
-        price    = float(df["close"].iloc[-1])
-        if price > kumo_top: return "bull"
-        if price < kumo_bot: return "bear"
-        return "neutral"
-    except Exception as e:
-        log.warning("_ichimoku_cloud_dir %s: %s — neutro", inst_id, e)
-        return "neutral"
-
-def _bollinger_check(inst_id: str, side: str) -> tuple[str, str, float]:
-    """Bollinger Esticada (15m) — verifica exaustão de preço antes de entrar.
-
-    Retorna (action, effective_side, rsi):
-      'allow'  — preço na banda correcta para o sinal → entra
-      'invert' — preço na banda oposta (armadilha) → inverte side e entra
-      'block'  — preço no corpo da Bollinger → não operar
-    Fail-safe: se API falhar, devolve ('allow', side, 0.0).
-    """
-    try:
-        df    = okx_candles(inst_id, bar="15m", limit=60)
-        close = df["close"]
-        mid   = close.rolling(BB_PERIOD).mean()
-        std   = close.rolling(BB_PERIOD).std()
-        upper = float((mid + BB_STD * std).iloc[-1])
-        lower = float((mid - BB_STD * std).iloc[-1])
-        price = float(close.iloc[-1])
-
-        delta = close.diff()
-        gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-        loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
-        rsi   = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
-
-        at_upper = price >= upper * (1 - BB_TOL_PCT / 100) and rsi >= 65
-        at_lower = price <= lower * (1 + BB_TOL_PCT / 100) and rsi <= 35
-
-        if side == "buy":
-            if at_lower: return ("allow",  "buy",  rsi)
-            if at_upper: return ("invert", "sell", rsi)
-        else:
-            if at_upper: return ("allow",  "sell", rsi)
-            if at_lower: return ("invert", "buy",  rsi)
-        return ("block", side, rsi)
-    except Exception as e:
-        log.warning("_bollinger_check %s: %s — permitindo entrada", inst_id, e)
-        return ("allow", side, 0.0)
 
 def _m5_confirm(inst_id: str, side: str) -> tuple[str, str, str, float]:
     """Confirmação M5: SAR Parabólico + RSI + Bollinger em 5 minutos.
@@ -1193,585 +912,24 @@ def _h1_band_opposite(inst_id: str, side: str) -> bool:
         log.warning("_h1_band_opposite %s: %s", inst_id, e)
         return False
 
-def tsar_signal(inst_id: str) -> str | None:
-    """TSAR V11 — Regra da Expulsão.
-    1) Vela anterior estava fora BB M5 + M15
-    2) RSI2 M5 em exaustão (>90 se cima, <10 se baixo)
-    3) Vela actual fecha de volta dentro de BB M5 + SAR M5 acabou de inverter
-    Retorna 'buy'/'sell' ou None.
-    """
-    try:
-        df5  = okx_candles(inst_id, bar="5m",  limit=100)
-        df15 = okx_candles(inst_id, bar="15m", limit=60)
-        c5   = df5["close"]
-
-        mid5  = c5.rolling(BB_PERIOD).mean()
-        std5  = c5.rolling(BB_PERIOD).std()
-        up5_p = float((mid5 + BB_STD * std5).iloc[-2])
-        lo5_p = float((mid5 - BB_STD * std5).iloc[-2])
-        up5_c = float((mid5 + BB_STD * std5).iloc[-1])
-        lo5_c = float((mid5 - BB_STD * std5).iloc[-1])
-        px_p  = float(c5.iloc[-2])
-        px_c  = float(c5.iloc[-1])
-
-        was_above = px_p > up5_p
-        was_below = px_p < lo5_p
-        if not (was_above or was_below):
-            return None
-
-        back_above = was_above and px_c <= up5_c
-        back_below = was_below and px_c >= lo5_c
-        if not (back_above or back_below):
-            return None
-
-        delta = c5.diff()
-        gain  = delta.clip(lower=0).ewm(span=2, adjust=False).mean()
-        loss  = (-delta).clip(lower=0).ewm(span=2, adjust=False).mean()
-        rsi2  = float(100 - (100 / (1 + gain.iloc[-1] / (loss.iloc[-1] + 1e-10))))
-        if back_above and rsi2 < 88: return None
-        if back_below and rsi2 > 12: return None
-
-        c15   = df15["close"]
-        mid15 = c15.rolling(BB_PERIOD).mean()
-        std15 = c15.rolling(BB_PERIOD).std()
-        up15  = float((mid15 + BB_STD * std15).iloc[-2])
-        lo15  = float((mid15 - BB_STD * std15).iloc[-2])
-        px15  = float(c15.iloc[-2])
-        if back_above and px15 <= up15: return None
-        if back_below and px15 >= lo15: return None
-
-        sar_dir = "bull" if back_below else "bear"
-        if not _sar_just_inverted(inst_id, sar_dir):
-            return None
-
-        candidate_side = "sell" if back_above else "buy"
-        cloud = _ichimoku_cloud_dir(inst_id)
-        if candidate_side == "sell" and cloud == "bull":
-            log.info("[TSAR] %s SHORT bloqueado — cloud BULLISH", inst_id); return None
-        if candidate_side == "buy" and cloud == "bear":
-            log.info("[TSAR] %s LONG bloqueado — cloud BEARISH", inst_id); return None
-        return candidate_side
-    except Exception as e:
-        log.warning("tsar_signal %s: %s", inst_id, e)
-        return None
-
-def tsar_pol_signal(inst_id: str) -> tuple[str, float] | None:
-    """POL SNIPER TSAR — Confirmação Dupla.
-    Trigger : BB M5+M15 toque (banda superior/inferior) + SAR M5 inversão.
-    Confirm : Ichimoku 1H cloud na mesma direcção (não bloqueia se neutro).
-    Filtro  : _pol_trend_filter_ok() anti-ignição.
-    Retorna (side, sar5_px) onde sar5_px é o SL dinâmico, ou None.
-    """
-    try:
-        df5  = okx_candles(inst_id, bar="5m",  limit=100)
-        df15 = okx_candles(inst_id, bar="15m", limit=60)
-        c5   = df5["close"]
-
-        # Bollinger M5
-        mid5 = c5.rolling(BB_PERIOD).mean()
-        std5 = c5.rolling(BB_PERIOD).std()
-        up5  = float((mid5 + BB_STD * std5).iloc[-1])
-        lo5  = float((mid5 - BB_STD * std5).iloc[-1])
-        px_c = float(c5.iloc[-1])
-
-        # Bollinger M15
-        c15   = df15["close"]
-        mid15 = c15.rolling(BB_PERIOD).mean()
-        std15 = c15.rolling(BB_PERIOD).std()
-        up15  = float((mid15 + BB_STD * std15).iloc[-1])
-        lo15  = float((mid15 - BB_STD * std15).iloc[-1])
-        px15  = float(c15.iloc[-1])
-
-        tol = BB_TOL_PCT / 100
-        at_upper = (px_c >= up5 * (1 - tol)) and (px15 >= up15 * (1 - tol))
-        at_lower = (px_c <= lo5 * (1 + tol)) and (px15 <= lo15 * (1 + tol))
-
-        if not (at_upper or at_lower):
-            return None
-
-        candidate = "sell" if at_upper else "buy"
-
-        # SAR M5 acabou de inverter na direcção certa
-        sar_dir = "bear" if candidate == "sell" else "bull"
-        if not _sar_just_inverted(inst_id, sar_dir):
-            return None
-
-        # SAR M5 price → SL dinâmico
-        psar5  = df5.ta.psar(af0=0.02, af=0.02, max_af=0.20)
-        col_l5 = next((c for c in psar5.columns if "PSARl" in c), None)
-        col_s5 = next((c for c in psar5.columns if "PSARs" in c), None)
-        sar5_px = 0.0
-        if col_l5 and col_s5:
-            sar5_bull = not pd.isna(psar5[col_l5].iloc[-1])
-            sar5_px = float(psar5[col_l5].iloc[-1] if sar5_bull else psar5[col_s5].iloc[-1])
-
-        # Ichimoku 1H cloud — confirmação (neutro = permitido)
-        cloud_dir = _ichimoku_cloud_dir(inst_id)
-        if candidate == "sell" and cloud_dir == "bull":
-            log.info("[TSAR POL] SHORT bloqueado — Ichimoku cloud BULLISH")
-            return None
-        if candidate == "buy" and cloud_dir == "bear":
-            log.info("[TSAR POL] LONG bloqueado — Ichimoku cloud BEARISH")
-            return None
-
-        # Filtro anti-ignição (engolfo + SAR duplo + safety)
-        if not _pol_trend_filter_ok(candidate, df5, df15, is_lightning=False):
-            return None
-
-        return (candidate, sar5_px)
-    except Exception as e:
-        log.warning("tsar_pol_signal %s: %s", inst_id, e)
-        return None
-
-def _pol_trend_filter_ok(side: str, df5: pd.DataFrame, df15: pd.DataFrame,
-                          is_lightning: bool = False) -> bool:
-    """Filtro anti-ignição de tendência para POL SNIPER TSAR.
-    Bloqueia se: engolfo bullish/bearish nos últimos 3 M5, ou SAR M5+M15 sincronia dupla.
-    Standard (não-lightning): exige também SAR M5 na direcção + preço abaixo/acima do BB mid.
-    """
-    try:
-        c5 = df5["close"]
-        o5 = df5["open"]
-
-        # 1. Engolfo detector (últimas 3 velas M5 completas)
-        avg_body = (c5 - o5).abs().rolling(20).mean()
-        for i in [-4, -3, -2]:
-            avg_b = float(avg_body.iloc[i])
-            if avg_b == 0 or pd.isna(avg_b): continue
-            body_curr = abs(float(c5.iloc[i]) - float(o5.iloc[i]))
-            bull_eng = (float(c5.iloc[i]) > float(o5.iloc[i]) and
-                        float(c5.iloc[i]) > float(c5.iloc[i-1]) and
-                        float(o5.iloc[i]) < float(o5.iloc[i-1]) and
-                        body_curr >= 2 * avg_b)
-            bear_eng = (float(c5.iloc[i]) < float(o5.iloc[i]) and
-                        float(c5.iloc[i]) < float(c5.iloc[i-1]) and
-                        float(o5.iloc[i]) > float(o5.iloc[i-1]) and
-                        body_curr >= 2 * avg_b)
-            if side == "sell" and bull_eng:
-                log.info("[POL FILTER] Bullish engolfo M5 → SHORT BLOQUEADO"); return False
-            if side == "buy" and bear_eng:
-                log.info("[POL FILTER] Bearish engolfo M5 → LONG BLOQUEADO"); return False
-
-        # 2. SAR M5 + M15 sincronia dupla → bloqueia contra-tendência
-        psar5  = df5.ta.psar(af0=0.02, af=0.02, max_af=0.20)
-        psar15 = df15.ta.psar(af0=0.02, af=0.02, max_af=0.20)
-        col_l5  = next((c for c in psar5.columns  if "PSARl" in c), None)
-        col_l15 = next((c for c in psar15.columns if "PSARl" in c), None)
-        sar5_bull  = bool(col_l5  and not pd.isna(psar5[col_l5].iloc[-1]))
-        sar15_bull = bool(col_l15 and not pd.isna(psar15[col_l15].iloc[-1]))
-
-        if side == "sell" and sar5_bull and sar15_bull:
-            log.info("[POL FILTER] SAR M5+M15 ambos BULL → SHORT PROIBIDO"); return False
-        if side == "buy" and (not sar5_bull) and (not sar15_bull):
-            log.info("[POL FILTER] SAR M5+M15 ambos BEAR → LONG PROIBIDO"); return False
-
-        # 3. Safety (standard apenas): SAR M5 na direcção certa + preço cruzou BB mid
-        if not is_lightning:
-            mid5   = c5.rolling(BB_PERIOD).mean()
-            bb_mid = float(mid5.iloc[-1])
-            px_c   = float(c5.iloc[-1])
-            if side == "sell" and (sar5_bull or px_c >= bb_mid):
-                log.info("[POL FILTER] SHORT safety: SAR5=%s px=%.5f mid=%.5f → BLOQUEADO",
-                         'bull' if sar5_bull else 'bear', px_c, bb_mid)
-                return False
-            if side == "buy" and ((not sar5_bull) or px_c <= bb_mid):
-                log.info("[POL FILTER] LONG safety: SAR5=%s px=%.5f mid=%.5f → BLOQUEADO",
-                         'bull' if sar5_bull else 'bear', px_c, bb_mid)
-                return False
-
-        return True
-    except Exception as e:
-        log.warning("_pol_trend_filter_ok: %s", e)
-        return True   # em erro, permite entrada
-
-def _tsar_btc_boost() -> tuple[bool, float]:
-    """Retorna (boost, rsi_btc). boost=True se BTC RSI M15 < 30 ou > 70 (extremos)."""
-    try:
-        df  = okx_candles("BTC-USDT-SWAP", bar="15m", limit=30)
-        c   = df["close"]
-        d   = c.diff()
-        g   = d.clip(lower=0).ewm(span=14, adjust=False).mean()
-        l   = (-d).clip(lower=0).ewm(span=14, adjust=False).mean()
-        rsi = float(100 - (100 / (1 + g.iloc[-1] / (l.iloc[-1] + 1e-10))))
-        return (rsi < 30 or rsi > 70, rsi)
-    except Exception:
-        return (False, 50.0)
-
-def _h1_trend_bull(inst_id: str) -> bool:
-    """True se preço > EMA20 H1 (tendência bullish no H1)."""
-    try:
-        df  = okx_candles(inst_id, bar="1H", limit=30)
-        ema = df["close"].ewm(span=20, adjust=False).mean()
-        return float(df["close"].iloc[-1]) > float(ema.iloc[-1])
-    except Exception:
-        return True
-
-def _tsar_status_text() -> str:
-    """Relatório /tsar status: BTC RSI M15 + SAR M5/M15 + RSI2 para BNB/SOL/ETH."""
-    boost, btc_rsi = _tsar_btc_boost()
-    boost_txt = "⚡ EXTREMO → +50%% size" if boost else "normal"
-    lines = [
-        f"⚔️ <b>TSAR V11 STATUS</b> — modo: <b>{'ON' if _tsar_mode=='on' else 'PAUSED' if _tsar_mode=='paused' else 'OFF'}</b>",
-        f"BTC RSI M15: <b>{btc_rsi:.1f}</b> ({boost_txt})\n"
-    ]
-    for inst_id, sym in [(FVG_BNB, "BNB"), (DUO_SOL, "SOL"), (DUO_ETH, "ETH")]:
-        try:
-            df5 = okx_candles(inst_id, bar="5m", limit=30)
-            c5  = df5["close"]
-            d   = c5.diff()
-            g   = d.clip(lower=0).ewm(span=2, adjust=False).mean()
-            l   = (-d).clip(lower=0).ewm(span=2, adjust=False).mean()
-            rsi2 = float(100 - (100 / (1 + g.iloc[-1] / (l.iloc[-1] + 1e-10))))
-            sar15 = _get_sar_m15_px(inst_id)
-            psar5 = df5.ta.psar(af0=0.02, af=0.02, max_af=0.20)
-            col_l = next((c for c in psar5.columns if "PSARl" in c), None)
-            sar5_bull = bool(col_l and not pd.isna(psar5[col_l].iloc[-1]))
-            h1_bull   = _h1_trend_bull(inst_id)
-            lines.append(
-                f"<b>{sym}</b>: SAR M5 {'🟢 BULL' if sar5_bull else '🔴 BEAR'} | "
-                f"SAR M15: {sar15:.4f} | RSI2 M5: {rsi2:.1f} | "
-                f"H1 {'↑ bull' if h1_bull else '↓ bear'}"
-            )
-        except Exception as e:
-            lines.append(f"<b>{sym}</b>: erro — {e}")
-    return "\n".join(lines)
-
 def _v11_dashboard_text() -> str:
-    with _strategy_lock:
-        st = dict(_strategy_enabled)
-    def m(flag):  return "✅ ON"  if flag else "⛔ OFF"
-    def mp(mode): return "✅ ON"  if mode == "on" else ("⚠️ PAUSED" if mode == "paused" else "⛔ OFF")
-    def s(key):   return "✅"     if st.get(key, False) else "⛔"
-    ichi_pr = False  # /pr ichimoku removido — filtro desactivado permanentemente
-    anti_ig = _tsar_pol_mode == "on"
+    opa_icon = "✅ ON" if _armadilha_mode else "⛔ OFF"
+    opd_icon = "✅ ON" if _mode_opd else "⛔ OFF"
+    ope_icon = "✅ ON" if _mode_ope else "⛔ OFF"
     return (
-        "📊 <b>PAINEL DE COMANDO V11</b> 📊\n\n"
-        "🛡️ <b>MOTORES PRINCIPAIS:</b>\n"
-        f"TSAR V11 (SOL/ETH): {mp(_tsar_mode)}\n"
-        f"POL SNIPER TSAR: {mp(_tsar_pol_mode)}\n\n"
-        "⚔️ <b>MODOS DE PRICE ACTION:</b>\n"
-        f"OPÇÃO B (PA Independente): {m(_mode_opb)}\n"
-        f"OPÇÃO C (Híbrido 5×/3×): {m(_mode_opc)}\n"
-        f"⚡ OPÇÃO D (Sniper MACD M5): {m(_mode_opd)}\n"
-        f"🏦 OPÇÃO E (ICT/Institucional 15m): {m(_mode_ope)}\n\n"
-        "🛑 <b>FILTROS GLOBAIS DE SEGURANÇA:</b>\n"
-        f"BTC Sentinel (RSI M15): {'✅ ATIVO' if _btc_sentinel_active else '⛔ DESLIGADO'}\n"
-        f"Prioridade Ichimoku 1H: {'✅ ATIVO (Invertido)' if ichi_pr else '⛔ OFF'}\n"
-        f"Anti-Ignição (Engolfo/SAR Duplo): {'✅ ATIVO' if anti_ig else '⛔ OFF'}\n\n"
-        "🎯 <b>ESTRATÉGIAS INDIVIDUAIS (LEGACY):</b>\n"
-        f"Engolfo: {s('engolfo')} | FVG: {s('fvg')}\n"
-        f"Pin Bar: {s('pin_bar')} | OB: {s('ob')}\n"
-        f"VWAP: {s('vwap')} | Supertrend: {s('supertrend')}\n\n"
-        "⚙️ <b>GESTÃO DE RISCO:</b>\n"
-        f"Alavancagem Base: <b>{LEVERAGE}×</b>\n"
-        f"Step Trail GV5: ✅ ATIVO"
+        "📊 <b>V11 FULL SQUAD (SNIPER ELITE)</b>\n"
+        "─────────────────────────────\n"
+        "📋 <b>ESTRATÉGIAS ACTIVAS:</b>\n"
+        "✅ ON — 🥇 GOLDEN POL (Ichimoku 1H)\n"
+        f"🪤 OpA (Armadilha Triple BB+SAR) [SOL, BNB, ETH, DOGE]: {opa_icon}\n"
+        f"⚡ OpD (Sniper MACD M5) [ETH]: {opd_icon}\n"
+        f"🏦 OpE (SMC/ICT M15) [ETH, BTC, SOL]: {ope_icon}\n"
+        "⚠️ TSAR V11, TSAR POL e Filtros Antigos foram ELIMINADOS.\n"
+        f"🛡️ SL 1.5% | Trail GV5 (BE 0.5% / Step 0.2%) | CB -${CIRCUIT_BREAKER_USD:.0f}\n"
+        "─────────────────────────────\n"
+        "Comandos: /pausar | /activar | /opa | /opd | /ope"
     )
 
-def order_block_signal(df: pd.DataFrame) -> str | None:
-    """ORDER BLOCK DEFENSE — ADA / XRP (1H candles).
-
-    Lógica:
-      1. Varre os últimos OB_LOOKBACK candles à procura de expansion candles
-         (volume ≥ OB_VOL_MULT × média20, corpo ≥ OB_BODY_MULT × média20).
-      2. Calcula o midpoint (50%) do corpo de cada OB encontrado.
-      3. Se o preço actual toca o midpoint (±OB_TOL_PCT%), emite sinal
-         na direcção da expansão original.
-      4. Filtro EMA200: LONG só acima, SHORT só abaixo.
-      5. Filtro RSI 35–65: evita entradas em extremos absolutos.
-    """
-    if len(df) < 50:
-        return None
-    df = df.copy()
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["rsi"]    = ta.rsi(df["close"], length=14)
-    df["body"]   = abs(df["close"] - df["open"])
-    df["vol_ma"] = df["vol"].rolling(20).mean()
-    df["bdy_ma"] = df["body"].rolling(20).mean()
-
-    cur_price = df["close"].iloc[-1]
-    ema200    = df["ema200"].iloc[-1]
-    rsi_now   = df["rsi"].iloc[-1]
-    if any(pd.isna(x) for x in [ema200, rsi_now]):
-        return None
-    if not (35 <= rsi_now <= 65):
-        return None
-
-    # Procura blocos de ordem nas últimas OB_LOOKBACK velas (excluindo a actual)
-    scan_start = max(0, len(df) - OB_LOOKBACK - 1)
-    for i in range(scan_start, len(df) - 1):
-        vol_i  = df["vol"].iloc[i];  vma = df["vol_ma"].iloc[i]
-        body_i = df["body"].iloc[i]; bma = df["bdy_ma"].iloc[i]
-        if pd.isna(vma) or pd.isna(bma) or vma == 0 or bma == 0:
-            continue
-        if vol_i < vma * OB_VOL_MULT or body_i < bma * OB_BODY_MULT:
-            continue  # não é expansion candle
-
-        ob_open  = df["open"].iloc[i]
-        ob_close = df["close"].iloc[i]
-        ob_mid   = (ob_open + ob_close) / 2
-        tol      = ob_mid * OB_TOL_PCT / 100
-        bullish_ob = ob_close > ob_open   # vela de expansão de alta
-        bearish_ob = ob_close < ob_open   # vela de expansão de baixa
-
-        price_at_mid = abs(cur_price - ob_mid) <= tol
-
-        if price_at_mid:
-            if bullish_ob and cur_price > ema200:
-                # Retorno ao OB bullish acima da EMA200 → LONG
-                return "buy"
-            if bearish_ob and cur_price < ema200:
-                # Retorno ao OB bearish abaixo da EMA200 → SHORT
-                return "sell"
-    return None
-
-# ══════════════════════════════════════════════════════════════════════════════
-# E10/E11/E12 — FAIR VALUE GAP (SOL / BNB / ETH — 15m)
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Cache de gaps activos por instrumento — persiste entre ciclos do loop principal
-# Estrutura: { inst_id: [ {gh, gl, side, created_bar, filled}, ... ] }
-_fvg_gaps: dict[str, list[dict]] = {}
-_fvg_bar_idx: dict[str, int]     = {}   # contador de velas por instrumento
-
-def fvg_signal(df: pd.DataFrame, inst_id: str) -> str | None:
-    """🔷 E10/E11/E12 FAIR VALUE GAP — SOL / BNB / ETH 15m  (backtest V9).
-
-    Detecta lacunas de liquidez (Fair Value Gaps) criadas por velas de impulso
-    e entra quando o preço retorna ao midpoint do gap.
-
-    Confirmações obrigatórias (todas):
-      1. Gap real entre high[i-2] e low[i] (bullish) ou low[i-2] e high[i] (bearish)
-      2. Vela central [i-1] com corpo ≥ FVG_BODY_MULT × média20 (impulso genuíno)
-      3. EMA200 alinhada com a direcção do gap
-      4. RSI 35–65 (evita entradas em extremos de mercado)
-      5. Retorno ao midpoint ± FVG_TOL_PCT% dentro de FVG_GAP_EXPIRY velas
-      6. Gap marcado como filled após entrada — sem re-entrada no mesmo gap
-
-    Regras de hold/strict herdadas de _fire() via classificação HOLD_PAIRS:
-      SOL, BNB, ETH → HOLD (SL 5%, circuit breaker -4%)
-    """
-    if len(df) < 230:   # warm-up EMA200 + margem
-        return None
-
-    df   = df.copy()
-    df["ema200"]  = ta.ema(df["close"], length=200)
-    df["rsi"]     = ta.rsi(df["close"], length=14)
-    df["body"]    = abs(df["close"] - df["open"])
-    df["body_ma"] = df["body"].rolling(20).mean()
-
-    if inst_id not in _fvg_gaps:
-        _fvg_gaps[inst_id]   = []
-        _fvg_bar_idx[inst_id] = 0
-
-    bar_now = _fvg_bar_idx[inst_id]
-
-    # ── Passo 1: detectar NOVOS gaps nas últimas 3 velas fechadas ─────────────
-    # Analisamos as últimas 5 velas para não perder gaps recentes após reinício
-    scan_start = max(2, len(df) - 5)
-    for i in range(scan_start, len(df) - 1):
-        a  = df.iloc[i - 2]
-        b  = df.iloc[i - 1]   # vela central (impulso)
-        c_ = df.iloc[i]
-
-        if any(pd.isna(x) for x in [b["ema200"], b["rsi"], b["body_ma"]]):
-            continue
-        if b["body_ma"] == 0:
-            continue
-
-        # Filtro de corpo: impulso genuíno
-        if b["body"] < b["body_ma"] * FVG_BODY_MULT:
-            continue
-
-        # Bullish FVG: high[i-2] < low[i]
-        if a["high"] < c_["low"] and b["close"] > b["ema200"]:
-            gap_id = f"B_{df.index[i].isoformat()}"
-            if not any(g.get("id") == gap_id for g in _fvg_gaps[inst_id]):
-                _fvg_gaps[inst_id].append({
-                    "id": gap_id, "gh": c_["low"], "gl": a["high"],
-                    "side": "buy", "created_bar": bar_now, "filled": False,
-                })
-
-        # Bearish FVG: low[i-2] > high[i]
-        if a["low"] > c_["high"] and b["close"] < b["ema200"]:
-            gap_id = f"S_{df.index[i].isoformat()}"
-            if not any(g.get("id") == gap_id for g in _fvg_gaps[inst_id]):
-                _fvg_gaps[inst_id].append({
-                    "id": gap_id, "gh": a["low"], "gl": c_["high"],
-                    "side": "sell", "created_bar": bar_now, "filled": False,
-                })
-
-    # ── Passo 2: verificar retorno a gaps existentes ──────────────────────────
-    cur = df.iloc[-2]   # vela fechada mais recente
-    if any(pd.isna(x) for x in [cur["ema200"], cur["rsi"]]):
-        _fvg_bar_idx[inst_id] = bar_now + 1
-        return None
-
-    rsi_ok = 35 <= cur["rsi"] <= 65
-
-    try:
-        df_4h = okx_candles(inst_id, bar="4H", limit=50)
-        ema20_4h = df_4h["close"].ewm(span=20, adjust=False).mean().iloc[-1]
-        price_4h = float(df_4h["close"].iloc[-1])
-        trend_4h_bull = price_4h > ema20_4h
-    except Exception:
-        trend_4h_bull = None  # fail-safe: não bloqueia se API falhar
-
-    signal_out = None
-
-    active_gaps = [g for g in _fvg_gaps[inst_id]
-                   if not g["filled"] and bar_now - g["created_bar"] <= FVG_GAP_EXPIRY]
-
-    for g in active_gaps:
-        if not rsi_ok:
-            break
-        mid = (g["gh"] + g["gl"]) / 2
-        tol = mid * FVG_TOL_PCT / 100
-
-        if g["side"] == "buy" and cur["close"] > cur["ema200"]:
-            if abs(cur["low"] - mid) <= tol or (cur["low"] <= mid <= cur["high"]):
-                if trend_4h_bull is None or trend_4h_bull:
-                    g["filled"] = True
-                    signal_out  = "buy"
-                    break
-
-        if g["side"] == "sell" and cur["close"] < cur["ema200"]:
-            if abs(cur["high"] - mid) <= tol or (cur["low"] <= mid <= cur["high"]):
-                if trend_4h_bull is None or not trend_4h_bull:
-                    g["filled"] = True
-                    signal_out  = "sell"
-                    break
-
-    # ── Passo 3: limpar gaps expirados ou preenchidos ─────────────────────────
-    _fvg_gaps[inst_id] = [
-        g for g in _fvg_gaps[inst_id]
-        if not g["filled"] and bar_now - g["created_bar"] <= FVG_GAP_EXPIRY
-    ]
-    _fvg_bar_idx[inst_id] = bar_now + 1
-
-    return signal_out
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PRICE ACTION — 5 operacionais autónomos (OpB / OpC)
-# ══════════════════════════════════════════════════════════════════════════════
-
-def signal_engolfo(df: pd.DataFrame) -> str | None:
-    if len(df) < 30: return None
-    df = df.copy()
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["rsi"]    = ta.rsi(df["close"], length=14)
-    df["vol_ma"] = df["vol"].rolling(20).mean()
-    c, p = df.iloc[-2], df.iloc[-3]
-    if pd.isna(c["ema200"]): return None
-    body = abs(c["close"] - c["open"])
-    if body < c["close"] * 0.0025: return None
-    if c["vol"] < c["vol_ma"] * 1.5: return None
-    pt = max(p["open"], p["close"]); pb = min(p["open"], p["close"])
-    ct = max(c["open"], c["close"]); cb = min(c["open"], c["close"])
-    bull = (p["close"] < p["open"] and c["close"] > c["open"]
-            and cb <= pb and ct >= pt and c["close"] > c["ema200"]
-            and 40 <= c["rsi"] <= 65)
-    bear = (p["close"] > p["open"] and c["close"] < c["open"]
-            and cb <= pb and ct >= pt and c["close"] < c["ema200"]
-            and 35 <= c["rsi"] <= 60)
-    if bull: return "buy"
-    if bear: return "sell"
-    return None
-
-def signal_pin_bar(df: pd.DataFrame) -> str | None:
-    if len(df) < 30: return None
-    df = df.copy()
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["rsi"]    = ta.rsi(df["close"], length=14)
-    df["vol_ma"] = df["vol"].rolling(20).mean()
-    bb = ta.bbands(df["close"], length=20, std=2.0)
-    if bb is None or bb.empty: return None
-    col_u = next((c for c in bb.columns if c.startswith("BBU_")), None)
-    col_l = next((c for c in bb.columns if c.startswith("BBL_")), None)
-    if col_u is None or col_l is None: return None
-    df["bb_u"] = bb[col_u]; df["bb_l"] = bb[col_l]
-    c = df.iloc[-2]
-    if pd.isna(c["ema200"]): return None
-    rng  = c["high"] - c["low"]
-    if rng == 0: return None
-    body = abs(c["close"] - c["open"])
-    lw   = min(c["open"], c["close"]) - c["low"]
-    uw   = c["high"] - max(c["open"], c["close"])
-    vol_ok = c["vol"] >= c["vol_ma"] * 1.3
-    bull = (lw >= 2*body and uw < 0.5*body
-            and c["close"] > c["ema200"]
-            and c["low"] <= c["bb_l"] * 1.002
-            and 25 <= c["rsi"] <= 50 and vol_ok)
-    bear = (uw >= 2*body and lw < 0.5*body
-            and c["close"] < c["ema200"]
-            and c["high"] >= c["bb_u"] * 0.998
-            and 50 <= c["rsi"] <= 75 and vol_ok)
-    if bull: return "buy"
-    if bear: return "sell"
-    return None
-
-def signal_inside_bar(df: pd.DataFrame) -> str | None:
-    if len(df) < 30: return None
-    df = df.copy()
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["rsi"]    = ta.rsi(df["close"], length=14)
-    df["vol_ma"] = df["vol"].rolling(20).mean()
-    c, p, m = df.iloc[-2], df.iloc[-3], df.iloc[-4]
-    if pd.isna(c["ema200"]): return None
-    inside = p["high"] <= m["high"] and p["low"] >= m["low"]
-    if not inside: return None
-    vol_ok = c["vol"] >= c["vol_ma"] * 1.4
-    bull = (c["close"] > m["high"] and c["close"] > c["ema200"]
-            and 45 <= c["rsi"] <= 65 and vol_ok)
-    bear = (c["close"] < m["low"] and c["close"] < c["ema200"]
-            and 35 <= c["rsi"] <= 55 and vol_ok)
-    if bull: return "buy"
-    if bear: return "sell"
-    return None
-
-def signal_ema21_rejection(df: pd.DataFrame) -> str | None:
-    if len(df) < 30: return None
-    df = df.copy()
-    df["ema21"]  = ta.ema(df["close"], length=21)
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["rsi"]    = ta.rsi(df["close"], length=14)
-    c, p = df.iloc[-2], df.iloc[-3]
-    if pd.isna(c["ema200"]): return None
-    touched = (min(c["low"], p["low"])   <= c["ema21"] * 1.002
-               and max(c["high"], p["high"]) >= c["ema21"] * 0.998)
-    if not touched: return None
-    rng = c["high"] - c["low"]
-    if rng == 0: return None
-    pavio = (c["low"] - min(c["open"], c["close"])) / rng
-    bull = (c["close"] > c["ema21"] and c["close"] > c["ema200"]
-            and pavio >= 0.35 and 40 <= c["rsi"] <= 60)
-    bear = (c["close"] < c["ema21"] and c["close"] < c["ema200"]
-            and pavio >= 0.35 and 40 <= c["rsi"] <= 60)
-    if bull: return "buy"
-    if bear: return "sell"
-    return None
-
-def signal_three_soldiers(df: pd.DataFrame) -> str | None:
-    if len(df) < 30: return None
-    df = df.copy()
-    df["ema200"] = ta.ema(df["close"], length=200)
-    df["rsi"]    = ta.rsi(df["close"], length=14)
-    df["vol_ma"] = df["vol"].rolling(20).mean()
-    v1, v2, v3 = df.iloc[-4], df.iloc[-3], df.iloc[-2]
-    if pd.isna(v3["ema200"]): return None
-    vol_cresce = v2["vol"] > v1["vol"] and v3["vol"] > v2["vol"]
-    soldiers = (v1["close"] > v1["open"] and v2["close"] > v2["open"]
-                and v3["close"] > v3["open"]
-                and v2["close"] > v1["close"] and v3["close"] > v2["close"]
-                and v3["close"] > v3["ema200"] and 50 <= v3["rsi"] <= 72
-                and vol_cresce)
-    crows = (v1["close"] < v1["open"] and v2["close"] < v2["open"]
-             and v3["close"] < v3["open"]
-             and v2["close"] < v1["close"] and v3["close"] < v2["close"]
-             and v3["close"] < v3["ema200"] and 28 <= v3["rsi"] <= 50
-             and vol_cresce)
-    if soldiers: return "buy"
-    if crows: return "sell"
-    return None
 
 def signal_macd_bollinger(df: pd.DataFrame) -> str | None:
     """OpD — Sniper MACD M5: exaustão fora das BB + histograma MACD a reverter.
@@ -1847,14 +1005,6 @@ def _verify_macro_bollinger(inst_id: str, side: str) -> bool:
         log.warning("_verify_macro_bollinger %s: %s", inst_id, e)
         return False
 
-PA_SIGNALS: dict[str, callable] = {
-    "engolfo":    signal_engolfo,
-    "pin_bar":    signal_pin_bar,
-    "inside_bar": signal_inside_bar,
-    "ema21":      signal_ema21_rejection,
-    "3soldiers":  signal_three_soldiers,
-}
-
 # ══════════════════════════════════════════════════════════════════════════════
 # MONITOR — aguarda fecho de posição em thread separada
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1919,16 +1069,13 @@ def _get_real_exit(inst_id: str) -> tuple[float, float]:
 def _monitor(inst_id: str, pos_side: str, side: str,
              entry: float, sl_px: float, activate_px: float,
              sym: str, dir_txt: str, bal: float, qty: int,
-             tag: str = "DUO ELITE", armadilha: bool = False, tsar: bool = False,
+             tag: str = "DUO ELITE", armadilha: bool = False,
              min_trail_pct: float = 0.0, fast_trail: bool = False) -> None:
-    global _duo_in_trade, _duo_cooldown_until, _tsar_combat_grau
+    global _duo_in_trade, _duo_cooldown_until
     log.info("📡 SENTINELA [%s] %s %s | SL=%.5f | Trailing activa a %.5f | STEP TRAIL V5",
              tag, sym, dir_txt, sl_px, activate_px)
     _none_streak      = 0
-    _step_trail_tier  = 0   # tier 0=nenhum activado; 1-5 = grau em vigor
-    tsar_locked       = False
-    tsar_peak         = 0.0
-    tsar_grau         = 0   # GV5 grau actual desta posição
+    _step_trail_tier  = 0
     _fast_be_done     = False
     while True:
         time.sleep(20)
@@ -1957,136 +1104,35 @@ def _monitor(inst_id: str, pos_side: str, side: str,
                         log.error("profit lock close fail %s: %s", sym, e)
                     continue
 
-            # ── 🚨 GLOBAL CIRCUIT BREAKER -4% — fecho imediato, protege banca ──
+            # ── 🚨 GLOBAL CIRCUIT BREAKER — fecho se PnL ≤ -$50 ────────────────
             if pos is not None:
-                mark_px_cb = float(pos.get("markPx", 0) or 0)
-                avg_px_cb  = float(pos.get("avgPx",  entry) or entry)
-                pos_sz_cb  = int(float(pos.get("pos", qty) or qty))
-                if mark_px_cb > 0 and avg_px_cb > 0:
-                    if side == "buy":
-                        adverse_pct = (avg_px_cb - mark_px_cb) / avg_px_cb * 100
-                    else:
-                        adverse_pct = (mark_px_cb - avg_px_cb) / avg_px_cb * 100
-                    if adverse_pct >= CIRCUIT_BREAKER_PCT:
-                        log.warning("🚨 CIRCUIT BREAKER %s: -%.2f%% preço — fechando!",
-                                    sym, adverse_pct)
-                        try:
-                            cancel_all_open_orders(inst_id); time.sleep(0.5)
-                            okx_close_market(inst_id, pos_side, pos_sz_cb)
-                            tg(f"🚨 <b>CIRCUIT BREAKER -{CIRCUIT_BREAKER_PCT:.0f}% — FECHO DE EMERGÊNCIA</b>\n"
-                               f"Par: <code>{sym}</code> | {dir_txt}\n"
-                               f"Movimento adverso: <b>-{adverse_pct:.2f}%</b> em preço\n"
-                               f"🛡️ Banca protegida — cooldown 30 min activado.")
-                            with _duo_lock:
-                                _duo_in_trade       = False
-                                _duo_cooldown_until = time.time() + DUO_COOLDOWN
-                            return
-                        except Exception as e:
-                            log.error("circuit breaker close fail %s: %s", sym, e)
-                        continue
+                upl_cb    = float(pos.get("upl", 0) or 0)
+                pos_sz_cb = int(float(pos.get("pos", qty) or qty))
+                if upl_cb <= -CIRCUIT_BREAKER_USD:
+                    log.warning("🚨 CIRCUIT BREAKER %s: PnL $%.2f — fechando!", sym, upl_cb)
+                    try:
+                        cancel_all_open_orders(inst_id); time.sleep(0.5)
+                        okx_close_market(inst_id, pos_side, pos_sz_cb)
+                        tg(f"🚨 <b>CIRCUIT BREAKER -${CIRCUIT_BREAKER_USD:.0f} — FECHO DE EMERGÊNCIA</b>\n"
+                           f"Par: <code>{sym}</code> | {dir_txt}\n"
+                           f"PnL nominal: <b>${upl_cb:+.2f} USDT</b>\n"
+                           f"🛡️ Banca protegida — cooldown activado.")
+                        with _duo_lock:
+                            _duo_in_trade       = False
+                            _duo_cooldown_until = time.time() + DUO_COOLDOWN
+                        return
+                    except Exception as e:
+                        log.error("circuit breaker close fail %s: %s", sym, e)
+                    continue
 
-            # ── GESTÃO DE POSIÇÃO (TSAR V11 | armadilha SAR M15 | Step Trail V5) ──
+            # ── GESTÃO DE POSIÇÃO (armadilha SAR M15 | Step Trail V5) ──────────
             if pos is not None:
                 upl     = float(pos.get("upl",    0) or 0)
                 mark_px = float(pos.get("markPx", 0) or 0)
                 avg_px  = float(pos.get("avgPx",  entry) or entry)
                 pos_sz  = int(float(pos.get("pos", qty) or qty))
 
-                if tsar:
-                    # ── TSAR V11 GV5 — 5 graus de lock crescente ──────────────
-                    new_grau = sum(1 for trig, _ in TSAR_GV5 if upl >= trig)
-                    if new_grau > tsar_grau and mark_px > 0 and avg_px > 0 and upl > 0:
-                        _, lock_usd = TSAR_GV5[new_grau - 1]
-                        if side == "buy":
-                            lock_px = avg_px + lock_usd * (mark_px - avg_px) / upl
-                        else:
-                            lock_px = avg_px - lock_usd * (avg_px - mark_px) / upl
-                        try:
-                            clear_garbage(inst_id, pos_side); time.sleep(0.5)
-                            okx_initial_sl(inst_id, pos_side, pos_sz, lock_px)
-                            tsar_grau = new_grau
-                            _tsar_combat_grau = new_grau
-                            tsar_peak = max(tsar_peak, upl)
-                            grau_bar = "🟢" * tsar_grau + "⚪" * (len(TSAR_GV5) - tsar_grau)
-                            prox_txt = (
-                                f"Próximo: +${TSAR_GV5[tsar_grau][0]:.0f} → piso +${TSAR_GV5[tsar_grau][1]:.0f}"
-                                if tsar_grau < len(TSAR_GV5) else "🏆 GRAU MÁXIMO — runner SAR M15 activo"
-                            )
-                            tg(f"⚔️ <b>TSAR GV5 GRAU {tsar_grau}/5</b> {grau_bar}\n"
-                               f"Par: <code>{sym}</code> | P&L: <b>${upl:+.2f}</b>\n"
-                               f"SL travado em +${lock_usd:.0f} ({lock_px:.5f})\n"
-                               f"{prox_txt}")
-                        except Exception as e:
-                            log.warning("TSAR GV5 upgrade G%d: %s", new_grau, e)
-
-                    if tsar_grau >= 1:
-                        tsar_peak  = max(tsar_peak, upl)
-                        sar15      = _get_sar_m15_px(inst_id)
-                        h1_bull    = _h1_trend_bull(inst_id)
-                        with_trend = (side == "buy" and h1_bull) or (side == "sell" and not h1_bull)
-
-                        if sar15 > 0 and mark_px > 0:
-                            sar_inv = ((side == "buy"  and sar15 > mark_px) or
-                                       (side == "sell" and sar15 < mark_px))
-                            if sar_inv:
-                                log.info("⚔️ TSAR GV5 G%d SAR M15 inverteu %s — fechando",
-                                         tsar_grau, sym)
-                                try:
-                                    cancel_all_open_orders(inst_id); time.sleep(0.5)
-                                    okx_close_market(inst_id, pos_side, pos_sz)
-                                    tg(f"⚔️ <b>TSAR — SAR M15 INVERTEU G{tsar_grau}/5</b>\n"
-                                       f"Par: <code>{sym}</code> | {dir_txt}\n"
-                                       f"P&L: <b>${upl:+.2f}</b> USDT | Pico: ${tsar_peak:+.2f}")
-                                    _tsar_combat_grau = 0
-                                    with _duo_lock:
-                                        _duo_in_trade       = False
-                                        _duo_cooldown_until = time.time() + TSAR_COOLDOWN
-                                except Exception as e:
-                                    log.error("TSAR GV5 SAR close: %s", e)
-                                return
-                            else:
-                                if ((side == "buy"  and sar15 > sl_px and sar15 < mark_px) or
-                                    (side == "sell" and sar15 < sl_px and sar15 > mark_px)):
-                                    try:
-                                        clear_garbage(inst_id, pos_side); time.sleep(0.5)
-                                        okx_initial_sl(inst_id, pos_side, pos_sz, sar15)
-                                        log.info("⚔️ TSAR GV5 ratchet %s %.5f→%.5f", sym, sl_px, sar15)
-                                        sl_px = sar15
-                                    except Exception as e:
-                                        log.warning("TSAR GV5 ratchet: %s", e)
-                                if not with_trend and upl < tsar_peak * 0.5:
-                                    log.info("⚔️ TSAR GV5 G%d contra H1 — pico $%.2f lucro $%.2f %s",
-                                             tsar_grau, tsar_peak, upl, sym)
-                                    try:
-                                        cancel_all_open_orders(inst_id); time.sleep(0.5)
-                                        okx_close_market(inst_id, pos_side, pos_sz)
-                                        tg(f"⚔️ <b>TSAR — SAÍDA AGRESSIVA G{tsar_grau} (contra H1)</b>\n"
-                                           f"Par: <code>{sym}</code> | P&L: ${upl:+.2f} "
-                                           f"(pico ${tsar_peak:+.2f})")
-                                        _tsar_combat_grau = 0
-                                        with _duo_lock:
-                                            _duo_in_trade       = False
-                                            _duo_cooldown_until = time.time() + TSAR_COOLDOWN
-                                    except Exception as e:
-                                        log.error("TSAR GV5 aggressive close: %s", e)
-                                    return
-
-                        if mark_px > 0 and _h1_band_opposite(inst_id, side):
-                            log.info("⚔️ TSAR GV5 alvo H1 G%d %s", tsar_grau, sym)
-                            try:
-                                cancel_all_open_orders(inst_id); time.sleep(0.5)
-                                okx_close_market(inst_id, pos_side, pos_sz)
-                                tg(f"⚔️ <b>TSAR — ALVO H1 ATINGIDO G{tsar_grau}/5 🏆</b>\n"
-                                   f"Par: <code>{sym}</code> | P&L: <b>${upl:+.2f}</b> USDT")
-                                _tsar_combat_grau = 0
-                                with _duo_lock:
-                                    _duo_in_trade       = False
-                                    _duo_cooldown_until = time.time() + TSAR_COOLDOWN
-                            except Exception as e:
-                                log.error("TSAR GV5 H1 close: %s", e)
-                            return
-
-                elif armadilha:
+                if armadilha:
                     # ── SAR M15 TRAILING — Armadilha V10 ─────────────────────
                     sar15 = _get_sar_m15_px(inst_id)
                     if sar15 > 0 and mark_px > 0:
@@ -2379,24 +1425,10 @@ def check_exhaustion_override(inst_id: str, sym: str) -> bool:
 def _fire(inst_id: str, side: str, signal_name: str,
           tag: str = "DUO ELITE", sl_pct: float | None = None,
           force: bool = False, qty_mult: float = 1.0,
-          tsar_monitor: bool = False, sl_px_override: float = 0.0,
+          sl_px_override: float = 0.0,
           min_trail_pct: float = 0.0, fast_trail: bool = False) -> bool:
-    """Executa ordem market + SL inicial + Step Trail V5.
-
-    Filtros antes da ordem (ignorados se force=True):
-      1. BTC Sentinel (maré macro 1H + RSI 15m)
-      2. RSI Dual: rsi14>50 e rsi2<45 para LONG; rsi14<50 e rsi2>55 para SHORT
-      3. ONE DIRECTION ONLY — aborta se já existe posição aberta
-
-    Limit order com desconto LIMIT_OFFSET_PCT (0.15%). Poll de fill até
-    LIMIT_FILL_TIMEOUT (180s); cancela e retorna False se não preencher.
-
-    SL routing (sobrepõe sl_pct passado, excepto se for explícito):
-      - HOLD pairs (POL/ETH/SOL): SL = HOLD_SL_PCT (5%) → circuit breaker
-      - STRICT pairs (ADA/DOGE): SL = STRICT_SL_PCT (1.5%)
-      - Outros: usa sl_pct passado ou DUO_SL_PCT
-    """
-    global _duo_in_trade, _lockdown_until, _btc_sentinel_active
+    """Executa ordem market + SL inicial + Step Trail V5."""
+    global _duo_in_trade, _lockdown_until
 
     # ── Routing automático do SL pela classificação do par ────────────────
     if sl_pct is None:
@@ -2409,35 +1441,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
 
     rsi14, rsi2 = get_rsi_dual(inst_id)   # para mensagem Telegram de entrada
 
-    if not force:
-        # ── BTC SENTINEL — filtro de maré (1H macro + RSI 15m) ──────────────
-        if _btc_sentinel_active:
-            btc_sentiment, btc_blocked, _btc_px, _btc_ema, _btc_rsi = get_btc_sentiment()
-            log.debug("[DEBUG] Sentinel consultado: BTC está %s (RSI=%.1f, bloqueado=%s)",
-                      btc_sentiment, _btc_rsi, btc_blocked)
-            if btc_blocked:
-                log.info("[SENTINEL] BTC RSI extremo (%.1f) — %s bloqueado", _btc_rsi, sym)
-                tg(f"[SENTINEL 🛡️] <b>{sym} bloqueado</b>\n"
-                   f"BTC RSI {_btc_rsi:.1f} — exaustão. Aguardando normalização.")
-                with _duo_lock:
-                    _lockdown_until = max(_lockdown_until, time.time() + 300)
-                return False
-            if btc_sentiment == "NEUTRO":
-                log.info("[SENTINEL] BTC em zona neutra — %s permitido com cautela", sym)
-            elif btc_sentiment in ("BULLISH", "BULLISH_FRACO") and side == "sell":
-                log.info("[SENTINEL 🛡️] %s SHORT bloqueado — BTC %s", sym, btc_sentiment)
-                tg(f"[SENTINEL 🛡️] <b>{sym} SHORT bloqueado</b>\n"
-                   f"BTC {btc_sentiment} (1H) — não vender contra a maré.")
-                return False
-            elif btc_sentiment in ("BEARISH", "BEARISH_FRACO") and side == "buy":
-                if check_exhaustion_override(inst_id, sym):
-                    pass  # Exceção Tática ativa — permite continuar
-                else:
-                    log.info("[SENTINEL 🛡️] %s LONG bloqueado — BTC %s", sym, btc_sentiment)
-                    tg(f"[SENTINEL 🛡️] <b>{sym} LONG bloqueado</b>\n"
-                       f"BTC {btc_sentiment} (1H) — não comprar contra a maré.")
-                    return False
-    else:
+    if force:
         log.info("⚡ [FORCE] %s — filtros IGNORADOS", sym)
 
     # ── FILTRO M5 / ARMADILHA TRIPLE BB ─────────────────────────────────────
@@ -2558,7 +1562,7 @@ def _fire(inst_id: str, side: str, signal_name: str,
        f"Par: <code>{sym}</code> | {dir_txt}\n"
        f"Fill: <code>{avg:.5f}</code> | SL: <code>{sl_px:.5f}</code> (-{sl_pct}%)\n"
        f"📡 Trailing activa a <code>{activate_px:.5f}</code> (+{TRAIL_ACTIVATE_PCT}%)\n"
-       f"🔒 Step Trail V5 activo | Circuit Breaker -{CIRCUIT_BREAKER_PCT:.0f}%")
+       f"🔒 Step Trail V5 activo | CB -${CIRCUIT_BREAKER_USD:.0f}")
 
     with _duo_lock:
         _duo_in_trade = True
@@ -2566,7 +1570,6 @@ def _fire(inst_id: str, side: str, signal_name: str,
     threading.Thread(target=_monitor,
         args=(inst_id, ps, side, avg, sl_px, activate_px, sym, dir_txt, bal, qty),
         kwargs={"tag": tag, "armadilha": (_armadilha_mode or _trail_mode == "gv6"),
-                "tsar": (_tsar_mode == "on" or tsar_monitor),
                 "min_trail_pct": min_trail_pct, "fast_trail": fast_trail},
         daemon=True, name=f"mon_{sym}").start()
     return True
@@ -2638,12 +1641,8 @@ def cmd_radar() -> str:
     """RADAR INTELIGENTE V2 — tendência macro + OI + funding + score de confiança."""
     lines = ["📡 <b>RADAR INTELIGENTE V2</b>"]
     checks = [
-        (GOLD_POL,   "POL",  "1H",  "15m", "🥇 ICHIMOKU",     ichimoku_signal),
-        (DUO_SOL,    "SOL",  "15m", "15m", "🌊 SUPERTREND",    supertrend_signal),
-        (DUO_ETH,    "ETH",  "15m", "15m", "💧 VWAP KISS",     vwap_kiss_signal),
-        (FVG_BNB,    "BNB",  "15m", "15m", "🔷 FVG",           lambda df: fvg_signal(df, FVG_BNB)),
-        (SHIELD_ADA, "ADA",  "1H",  "1H",  "🛡️ ORDER BLOCK",  order_block_signal),
-        (GOLD_DOGE,  "DOGE", "1H",  "1H",  "🎲 ORDER BLOCK",   order_block_signal),
+        (GOLD_POL, "POL", "1H",  "15m", "🥇 ICHIMOKU", ichimoku_signal),
+        (DUO_ETH,  "ETH", "5m",  "15m", "⚡ MACD BB",  signal_macd_bollinger),
     ]
 
     for inst_id, sym, bar, bar_macro, label, sig_fn in checks:
@@ -2877,7 +1876,7 @@ def cmd_gv5() -> str:
 # ── /force [coin] — Ordem manual ignorando filtros (RSI direccional) ──────────
 _FORCE_MAP = {
     "pol": GOLD_POL, "eth": DUO_ETH, "sol": DUO_SOL,
-    "ada": SHIELD_ADA, "doge": GOLD_DOGE, "bnb": FVG_BNB,
+    "doge": GOLD_DOGE, "bnb": FVG_BNB,
 }
 
 def cmd_force(coin: str) -> str:
@@ -3352,23 +2351,18 @@ def _status_text() -> str:
         bal_str = f"<b>${eq:,.2f}</b> total | <b>${avail:,.2f}</b> livre"
 
     trail_txt = ("🔒 GV5 Step Trail" if _trail_mode == "gv5" else "📡 GV6 SAR M15")
-    arm_txt   = "🪤 ARMADILHA ON" if _armadilha_mode else ""
-    tsar_txt  = f"⚔️ TSAR {'ON' if _tsar_mode == 'on' else 'PAUSED'}" if _tsar_mode else ""
-    tpol_txt  = f"🎯 TSAR POL {'ON' if _tsar_pol_mode == 'on' else 'PAUSED'}" if _tsar_pol_mode else ""
-    modes_txt = " | ".join(filter(None, [trail_txt, arm_txt, tsar_txt, tpol_txt]))
-    return (f"📊 <b>COMMANDER V11 — {datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}</b>\n"
+    arm_txt   = "🪤 OpA ON" if _armadilha_mode else ""
+    modes_txt = " | ".join(filter(None, [trail_txt, arm_txt]))
+    return (f"📊 <b>SNIPER ELITE — {datetime.now(timezone.utc).strftime('%d/%m %H:%M UTC')}</b>\n"
             f"💰 {bal_str}\n"
             f"Status: {status}\n"
-            f"⚙️ Alavancagem: <b>{LEVERAGE}×</b>  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%\n"
+            f"⚙️ Alavancagem: <b>{LEVERAGE}×</b>  |  CB -${CIRCUIT_BREAKER_USD:.0f}\n"
             f"🎛️ Modo: {modes_txt}\n"
-            f"🔥 TODOS os 7 pares entram AUTOMÁTICO\n"
-            f"POL · SOL · ETH · XRP · BNB · ADA · DOGE\n\n"
+            f"🥇 POL · 🪤 OpA [SOL/BNB/ETH/DOGE] · ⚡ OpD [ETH] · 🏦 OpE [ETH/BTC/SOL]\n\n"
             f"<b>COMANDOS:</b>\n"
             f"/tp /radar /lpd /meta /status /panic\n"
-            f"/go[coin] /gv5 /gv6 /force [coin] /risco\n"
-            f"/tsar on|pause|off|status\n"
-            f"/tsarpol on|pause|off|status\n"
-            f"/subir [2-10]  |  /armadilha\n"
+            f"/opa /opd /ope /modo_sniper /armadilha\n"
+            f"/subir [2-10]  |  /gv5 /gv6\n"
             f"/pause → só /start desbloqueia")
 
 def report_loop() -> None:
@@ -3386,13 +2380,12 @@ _tg_offset = 0
 _GO_MAP = {
     "goeth":  DUO_ETH,
     "gosol":  DUO_SOL,
-    "goada":  SHIELD_ADA,
     "godoge": GOLD_DOGE,
     "gobnb":  FVG_BNB,
 }
 
 def telegram_commands_loop() -> None:
-    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _tsar_mode, _tsar_pol_mode, _tsar_combat_grau, _mode_opb, _mode_opc, _mode_opd, _mode_ope
+    global _tg_offset, _bot_authorized, _panic_until, LEVERAGE, _trail_mode, _armadilha_mode, _mode_opd, _mode_ope
     if not TELEGRAM_TOKEN:
         log.warning("TELEGRAM_TOKEN não configurado — comandos desativados.")
         return
@@ -3510,60 +2503,27 @@ def telegram_commands_loop() -> None:
 
                 # ── /estrategias — lista estado ON/OFF de cada estratégia ───────
                 elif cmd == "estrategias":
-                    with _strategy_lock:
-                        snap = dict(_strategy_enabled)
-                    labels = {
-                        "ichimoku":   "🥇 POL  ICHIMOKU 1H",
-                        "supertrend": "🌊 SOL  SUPERTREND 15m",
-                        "rsidiv":     "🎯 RSI DIV + VWAP 15m",
-                        "vwap":       "💧 ETH  VWAP KISS 15m",
-                        "engolfo":    "🔥 SOL  ENGOLFO 15m",
-                        "ob":         "🛡️ ADA/DOGE  ORDER BLOCK 1H",
-                        "fvg":        "🔷 SOL/BNB/ETH  FVG 15m",
-                    }
-                    lines = ["📋 <b>ESTRATÉGIAS — estado actual</b>\n"]
-                    for k, label in labels.items():
-                        icon = "✅ ON " if snap[k] else "⛔ OFF"
-                        lines.append(f"{icon} — {label}")
-                    tsar_icon = "✅ ON " if _tsar_mode == "on" else ("⏸ PAU" if _tsar_mode == "paused" else "⛔ OFF")
-                    lines.append(f"{tsar_icon} — ⚔️ BNB/SOL/ETH  TSAR V11 (Expulsão)")
-                    tpol_icon = "✅ ON " if _tsar_pol_mode == "on" else ("⏸ PAU" if _tsar_pol_mode == "paused" else "⛔ OFF")
-                    lines.append(f"{tpol_icon} — 🎯 POL  SNIPER TSAR (Inversão Total)")
-                    opb_icon = "✅ ON " if _mode_opb else "⛔ OFF"
-                    opc_icon = "✅ ON " if _mode_opc else "⛔ OFF"
+                    opa_icon = "✅ ON " if _armadilha_mode else "⛔ OFF"
                     opd_icon = "✅ ON " if _mode_opd else "⛔ OFF"
                     ope_icon = "✅ ON " if _mode_ope else "⛔ OFF"
-                    lines.append(f"{opb_icon} — 📐 ETH/SOL/BNB/POL  OPÇÃO B (PA Indep.)")
-                    lines.append(f"{opc_icon} — 🔀 ETH/SOL  OPÇÃO C (Híbrido TSAR+PA)")
-                    lines.append(f"{opd_icon} — ⚡ ETH/SOL/POL  OPÇÃO D (Sniper MACD M5)")
-                    lines.append(f"{ope_icon} — 🏦 BTC/ETH/SOL  OPÇÃO E (ICT/SMC 15m)")
-                    lines.append("\n<i>/pausar [chave] | /activar [chave] | tudo</i>\n"
-                                 "<i>/tsar on | pause | off | status</i>\n"
-                                 "<i>/tsarpol on | pause | off | status</i>\n"
-                                 "<i>/opb /opc /opd /ope — toggle modos PA</i>")
+                    lines = [
+                        "📋 <b>ESTRATÉGIAS — estado actual</b>\n",
+                        "✅ ON  — 🥇 POL  ICHIMOKU 1H",
+                        f"{opa_icon} — 🪤 OpA  Triple BB+SAR [SOL/BNB/ETH/DOGE]",
+                        f"{opd_icon} — ⚡ OpD  Sniper MACD M5 [ETH]",
+                        f"{ope_icon} — 🏦 OpE  ICT/SMC 15m [ETH/BTC/SOL]",
+                        "\n<i>/opa /opd /ope — toggle | /modo_sniper — foco OpD</i>",
+                    ]
                     tg("\n".join(lines), chat_id)
 
-                # ── /opb — Opção B PA Independentes ON/OFF ───────────────────
-                elif cmd == "opb":
-                    _mode_opb = not _mode_opb
-                    estado = "✅ LIGADA" if _mode_opb else "⭕ DESLIGADA"
-                    tg(f"📐 <b>Opção B — PA Independentes: {estado}</b>\n"
-                       f"4 operacionais autónomos em ETH/SOL/BNB/POL\n"
-                       f"Engolfo | Pin Bar | Inside Bar | EMA21 | 3 Soldiers\n"
-                       f"{'⚠️ Mais trades — win rate ~72%' if _mode_opb else ''}",
-                       chat_id)
-                    log.info("Opção B: %s", estado)
-
-                # ── /opc — Opção C Híbrido TSAR+PA ON/OFF ────────────────────
-                elif cmd == "opc":
-                    _mode_opc = not _mode_opc
-                    estado = "✅ LIGADA" if _mode_opc else "⭕ DESLIGADA"
-                    tg(f"🔀 <b>Opção C — Híbrido: {estado}</b>\n"
-                       f"TSAR + PA → 5× | Só PA → 3×\n"
-                       f"Pares: ETH e SOL\n"
-                       f"{'⚠️ Equilíbrio entre frequência e precisão' if _mode_opc else ''}",
-                       chat_id)
-                    log.info("Opção C: %s", estado)
+                # ── /opa — Armadilha Triple BB+SAR ON/OFF ────────────────────
+                elif cmd == "opa":
+                    _armadilha_mode = not _armadilha_mode
+                    estado = "✅ LIGADA" if _armadilha_mode else "⭕ DESLIGADA"
+                    tg(f"🪤 <b>OpA — Armadilha Triple BB+SAR: {estado}</b>\n"
+                       f"Pares: SOL · BNB · ETH · DOGE\n"
+                       f"SL 1.0% | SAR M5 trailing | H1 alvo oposto", chat_id)
+                    log.info("OpA: %s", estado)
 
                 # ── /opd — Opção D Sniper MACD M5 ON/OFF ─────────────────────
                 elif cmd == "opd":
@@ -3588,36 +2548,16 @@ def telegram_commands_loop() -> None:
                        chat_id)
                     log.info("Opção E: %s", estado)
 
-                # ── /modo_sniper — foca apenas OpD, desliga OpB/OpC/OpE ─────────
+                # ── /modo_sniper — foca apenas OpD, desliga OpA/OpE ──────────
                 elif cmd == "modo_sniper":
-                    _mode_opb = False
-                    _mode_opc = False
+                    _armadilha_mode = False
                     _mode_ope = False
                     _mode_opd = True
                     tg("⚡ <b>MODO SNIPER ACTIVADO</b>\n"
-                       "OpB ⭕ | OpC ⭕ | OpE ⭕\n"
+                       "OpA ⭕ | OpE ⭕\n"
                        "<b>OpD ✅ MACD M5+MTFA — FOCO TOTAL</b>\n"
                        "SL imediato 1.5% | Break-Even a +0.5% | Trail 0.2%", chat_id)
                     log.info("Modo Sniper: OpD isolada")
-
-                # ── /sentinel [on|off] — toggle ou força estado BTC Sentinel ───
-                elif cmd == "sentinel":
-                    global _btc_sentinel_active
-                    if args and args[0] in ("on", "off", "ligar", "desligar"):
-                        _btc_sentinel_active = args[0] in ("on", "ligar")
-                    else:
-                        _btc_sentinel_active = not _btc_sentinel_active
-                    if _btc_sentinel_active:
-                        sentiment, blocked, px, ema, rsi = get_btc_sentiment()
-                        tg(f"🛡️ <b>BTC Sentinel ACTIVO ✅</b>\n"
-                           f"BTC agora: <b>{sentiment}</b>\n"
-                           f"Price: {px:,.0f} | EMA20 1H: {ema:,.0f} | RSI 15m: {rsi:.1f}\n"
-                           f"Filtra contra-tendência em todos os 7 pares.", chat_id)
-                    else:
-                        tg(f"🛡️ <b>BTC Sentinel DESLIGADO ⚠️</b>\n"
-                           f"Todas as entradas permitidas sem filtro BTC.\n"
-                           f"Para religar: <code>/sentinel on</code>", chat_id)
-                    log.info("BTC Sentinel: %s", "ACTIVO" if _btc_sentinel_active else "OFF")
 
                 # ── /btc — leitura rápida do Comandante BTC ──────────────────
                 elif cmd == "btc":
@@ -3638,8 +2578,7 @@ def telegram_commands_loop() -> None:
                             tg(f"🧐 <b>Comandante BTC</b>\n"
                                f"Preço: <b>${price:,.0f}</b> | EMA20 1H: <b>${ema20:,.0f}</b>\n"
                                f"Tendência: <b>{tend_icon}</b>\n"
-                               f"RSI 15m: <b>{rsi:.1f}</b>{rsi_note}\n"
-                               f"Sentinel: {'🛡️ ACTIVO' if _btc_sentinel_active else '⚠️ OFF'}", chat_id)
+                               f"RSI 15m: <b>{rsi:.1f}</b>{rsi_note}", chat_id)
                         log.info("/btc consultado: %s price=%.0f ema20=%.0f rsi=%.1f",
                                  sentiment, price, ema20, rsi)
                     except Exception as e:
@@ -3666,7 +2605,6 @@ def telegram_commands_loop() -> None:
                         log.info("Alavancagem alterada para %dx via Telegram", lev)
 
                 elif cmd == "armadilha":
-                    global _armadilha_mode
                     if _armadilha_mode:
                         _armadilha_mode = False
                         tg("🔓 <b>MODO ARMADILHA DESLIGADO</b>\n"
@@ -3681,120 +2619,6 @@ def telegram_commands_loop() -> None:
                            "• <b>SL dinâmico</b>: SAR M5 price\n"
                            "• <b>Saída</b>: SAR M15 inversão ou banda H1 oposta\n"
                            "Usa <code>/armadilha</code> para desligar.", chat_id)
-
-                # ── /tsar — PROTOCOLO TSAR V11 ────────────────────────────────
-                elif cmd == "tsar":
-                    if not args:
-                        tg("⚔️ Uso: <code>/tsar on | pause | off | status</code>", chat_id)
-                    elif args[0] == "on":
-                        _tsar_mode = "on"
-                        with _pending_lock: _pending_signals.clear()
-                        _save_state(_bot_authorized)
-                        tg("⚔️ <b>TSAR V11 MODO COMBATE ACTIVADO</b>\n"
-                           "─────────────────────────────\n"
-                           "Pares: <b>ETH · SOL</b>\n"
-                           "• Regra da Expulsão: BB M5+M15 + RSI2 ≥88/≤12 + SAR M5 flip\n"
-                           "• BTC RSI M15 extremo (&lt;30 ou &gt;70) → +50%% size\n"
-                           "• SL hard: <b>2%%</b> | GV5: G1$30→G2$50→G3$75→G4$100→G5$150\n"
-                           "• H1 favor → trailing lento | H1 contra → saída agressiva 50%%\n"
-                           "• FVG automaticamente pausada | Cooldown: 15 min\n"
-                           "Usa <code>/tsar off</code> para desligar.", chat_id)
-                    elif args[0] == "pause":
-                        _tsar_mode = "paused"
-                        _save_state(_bot_authorized)
-                        tg("⏸ <b>TSAR PAUSADO</b>\n"
-                           "Sem novas entradas. Posições abertas continuam geridas.", chat_id)
-                    elif args[0] in ("off", "stop"):
-                        _tsar_mode = ""
-                        _save_state(_bot_authorized)
-                        tg("🔓 <b>TSAR DESLIGADO</b>\nFVG e outras estratégias retomadas.", chat_id)
-                    elif args[0] == "status":
-                        try: tg(_tsar_status_text(), chat_id)
-                        except Exception as e: tg(f"Erro /tsar status: {e}", chat_id)
-                    else:
-                        tg("❌ Opções: <code>/tsar on | pause | off | status</code>", chat_id)
-
-                # ── /combat — alias rápido para /tsar on|off ────────────────────
-                elif cmd == "combat":
-                    if not args or args[0] in ("on", "start"):
-                        _tsar_mode = "on"
-                        with _pending_lock: _pending_signals.clear()
-                        _save_state(_bot_authorized)
-                        tg("⚔️ <b>MODO COMBATE ACTIVADO</b>\n"
-                           "ETH · SOL | GV5 | RSI2 ≥88/≤12 | SL 2%% | Cooldown 15min", chat_id)
-                    elif args[0] in ("off", "stop"):
-                        _tsar_mode = ""
-                        _save_state(_bot_authorized)
-                        tg("🔓 <b>MODO COMBATE DESLIGADO</b>", chat_id)
-                    else:
-                        tg("Uso: <code>/combat on | off</code>", chat_id)
-
-                # ── /grau — estado GV5 da posição TSAR activa ───────────────────
-                elif cmd == "grau":
-                    g = _tsar_combat_grau
-                    grau_bar = "🟢" * g + "⚪" * (len(TSAR_GV5) - g)
-                    if g == 0:
-                        status_txt = "Sem grau activo (posição ainda não atingiu G1 ou sem posição)"
-                    else:
-                        trig, lock = TSAR_GV5[g - 1]
-                        nxt = (f"Próximo G{g+1}: +${TSAR_GV5[g][0]:.0f}"
-                               if g < len(TSAR_GV5) else "🏆 GRAU MÁXIMO")
-                        status_txt = f"G{g}/5 travado em +${lock:.0f} | {nxt}"
-                    tg(f"⚔️ <b>TSAR GV5</b> {grau_bar}\n{status_txt}\n"
-                       f"Graus: G1$30→$25 | G2$50→$35 | G3$75→$55 | G4$100→$75 | G5$150→$110",
-                       chat_id)
-
-                # ── /tsarpol — POL SNIPER TSAR ─────────────────────────────────
-                elif cmd == "tsarpol":
-                    if not args:
-                        tg("🎯 Uso: <code>/tsarpol on | pause | off | status</code>", chat_id)
-                    elif args[0] == "on":
-                        _tsar_pol_mode = "on"
-                        _save_state(_bot_authorized)
-                        tg("🎯 <b>POL SNIPER TSAR ACTIVADO</b>\n"
-                           "─────────────────────────────\n"
-                           "Par: <b>POL-USDT-SWAP</b>\n"
-                           "• Inversão Total: Ichimoku 1H é contexto, nunca gatilho\n"
-                           "• Lightning: RSI2 ≤ 1 ou ≥ 90 + fora da BB → entrada imediata\n"
-                           "• Standard: BB M5+M15 + RSI2 &lt;12/&gt;88 + SAR M5 flip\n"
-                           "• SL hard: <b>2%%</b> | Lock $30 → SAR M15 trailing\n"
-                           "Usa <code>/tsarpol off</code> para desligar.", chat_id)
-                    elif args[0] == "pause":
-                        _tsar_pol_mode = "paused"
-                        _save_state(_bot_authorized)
-                        tg("⏸ <b>POL SNIPER TSAR PAUSADO</b>\n"
-                           "Sem novas entradas. Posições abertas continuam geridas.", chat_id)
-                    elif args[0] in ("off", "stop"):
-                        _tsar_pol_mode = ""
-                        _save_state(_bot_authorized)
-                        tg("🔓 <b>POL SNIPER TSAR DESLIGADO</b>\nIchimoku POL retoma se activado.", chat_id)
-                    elif args[0] == "status":
-                        try:
-                            boost, btc_rsi = _tsar_btc_boost()
-                            boost_txt = "⚡ EXTREMO → +50%% size" if boost else "normal"
-                            df5 = okx_candles(GOLD_POL, bar="5m", limit=30)
-                            c5  = df5["close"]
-                            d   = c5.diff()
-                            g   = d.clip(lower=0).ewm(span=2, adjust=False).mean()
-                            l   = (-d).clip(lower=0).ewm(span=2, adjust=False).mean()
-                            rsi2 = float(100 - (100 / (1 + g.iloc[-1] / (l.iloc[-1] + 1e-10))))
-                            sar15 = _get_sar_m15_px(GOLD_POL)
-                            psar5 = df5.ta.psar(af0=0.02, af=0.02, max_af=0.20)
-                            col_l = next((c for c in psar5.columns if "PSARl" in c), None)
-                            sar5_bull = bool(col_l and not pd.isna(psar5[col_l].iloc[-1]))
-                            h1_bull   = _h1_trend_bull(GOLD_POL)
-                            ichi_sig  = None
-                            try: ichi_sig = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
-                            except Exception: pass
-                            ichi_txt = f"Ichimoku 1H: {'↑ LONG' if ichi_sig=='buy' else '↓ SHORT' if ichi_sig=='sell' else 'neutro'}"
-                            tg(f"🎯 <b>POL SNIPER TSAR STATUS</b> — modo: <b>{'ON' if _tsar_pol_mode=='on' else 'PAUSED' if _tsar_pol_mode=='paused' else 'OFF'}</b>\n"
-                               f"BTC RSI M15: <b>{btc_rsi:.1f}</b> ({boost_txt})\n"
-                               f"<b>POL</b>: SAR M5 {'🟢 BULL' if sar5_bull else '🔴 BEAR'} | SAR M15: {sar15:.5f} | RSI2: {rsi2:.1f} | H1 {'↑' if h1_bull else '↓'}\n"
-                               f"{ichi_txt} (contexto — não é gatilho)", chat_id)
-                        except Exception as e:
-                            tg(f"Erro /tsarpol status: {e}", chat_id)
-                    else:
-                        tg("❌ Opções: <code>/tsarpol on | pause | off | status</code>", chat_id)
 
                 elif cmd in ("status", "s"):
                     try: tg(_status_text(), chat_id)
@@ -3954,7 +2778,7 @@ def telegram_commands_loop() -> None:
                        "/force [coin] — Ordem mercado bypass filtros\n"
                        "  Ex: <code>/force bnb</code>  (RSI 15m decide LONG/SHORT)\n\n"
                        "🥇 POL/SOL/ETH/BNB/ADA/DOGE — TODOS AUTOMÁTICOS\n\n"
-                       f"CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD SL {HOLD_SL_PCT:.0f}%  |  STRICT SL {STRICT_SL_PCT:.1f}%\n"
+                       f"CB -${CIRCUIT_BREAKER_USD:.0f}  |  HOLD SL {HOLD_SL_PCT:.0f}%  |  STRICT SL {STRICT_SL_PCT:.1f}%\n"
                        f"GV5/GV6  |  Lev actual: <b>{LEVERAGE}×</b>  |  cd 5min", chat_id)
 
                 # ── /v11 — Painel de Comando Tático completo ───────────────────
@@ -4053,20 +2877,15 @@ def _queue_signal(inst_id: str, sig: str, signal_name: str, tag: str,
 
 def duo_elite_loop() -> None:
     global _duo_in_trade, _duo_cooldown_until, _panic_until
-    log.info("🎯 V11 COMMANDER SUITE — FULL SQUAD + TSAR V11 READY — TODOS AUTOFIRE")
-    tg("🏆 <b>V11 FULL SQUAD — TODOS OS PARES AUTOMÁTICOS</b>\n\n"
-       "🥇 <b>POL</b> — ICHIMOKU 1H (97.4% hit)\n"
-       "🌊 <b>SOL</b> — SUPERTREND + FVG 15m\n"
-       "💧 <b>ETH</b> — VWAP KISS + FVG 15m\n"
-       "🔷 <b>BNB</b> — FVG 15m (65.2% hit)\n"
-       "🛡️ <b>ADA</b> — ORDER BLOCK 1H\n"
-       "🎲 <b>DOGE</b> — ORDER BLOCK 1H\n"
-       "⚔️ <b>BNB/SOL/ETH</b> — TSAR V11 (Expulsão BB)\n\n"
-       "⚡ <b>TODOS entram automático</b> — sem /go[coin] obrigatório\n"
-       "(O /go[coin] ainda existe para confirmar manualmente se quiseres)\n\n"
-       f"🔒 GV5/GV6  |  CB -{CIRCUIT_BREAKER_PCT:.0f}%  |  HOLD {HOLD_SL_PCT:.0f}%  |  STRICT {STRICT_SL_PCT:.1f}%  |  "
+    log.info("🎯 V11 SNIPER ELITE — FULL SQUAD READY — AUTOFIRE")
+    tg("🏆 <b>V11 SNIPER ELITE — FULL SQUAD ACTIVO</b>\n\n"
+       "🥇 <b>POL</b> — GOLDEN (Ichimoku 1H)\n"
+       "🪤 <b>SOL · BNB · ETH · DOGE</b> — OpA (Armadilha Triple BB+SAR)\n"
+       "⚡ <b>ETH</b> — OpD (Sniper MACD M5+MTFA)\n"
+       "🏦 <b>BTC · ETH · SOL</b> — OpE (ICT/SMC 15m)\n\n"
+       f"🔒 GV5  |  CB -${CIRCUIT_BREAKER_USD:.0f}  |  SL 1.5%  |  "
        f"{LEVERAGE}× ALL-IN  |  cd 5min\n"
-       "✅ <b>10 ESTRATÉGIAS ATIVAS. TSAR V11 PRONTO.</b>")
+       "✅ <b>PURGE COMPLETA — SQUAD LIMPO.</b>")
 
     while True:
         try:
@@ -4123,259 +2942,47 @@ def duo_elite_loop() -> None:
                         tg(f"🥇 <b>GOLDEN — POL ICHIMOKU INVERTIDO</b>\n"
                            f"Par: <code>POL-USDT-SWAP</code> | Sinal: <b>ICHIMOKU 1H (exaustão)</b>\n"
                            f"Direção: <b>{dir_scout}</b>  | raw={sig_raw} → invertido\n"
-                           f"💰 Hold the hand — alvo $20 NET. Circuit breaker -{CIRCUIT_BREAKER_PCT:.0f}%.")
+                           f"💰 Hold the hand — alvo $20 NET. Circuit breaker -${CIRCUIT_BREAKER_USD:.0f}.")
                         fired = _fire(GOLD_POL, sig, "ICHIMOKU POL", tag="🥇 GOLDEN POL")
                     else:
                         log.info("[POL] sem sinal")
                 except Exception as e:
                     log.error("[POL] %s", e)
 
-            # ── 🎯 POL SNIPER TSAR — Confirmação Dupla BB+SAR+Ichimoku ─────────
-            if not fired and _tsar_pol_mode == "on":
-                try:
-                    result = tsar_pol_signal(GOLD_POL)
-                    if result:
-                        sig, sar5_px = result
-                        cloud_dir = _ichimoku_cloud_dir(GOLD_POL)
-                        ichi_note = (f" | ☁️ Ichimoku {'↑ bull' if cloud_dir=='bull' else '↓ bear' if cloud_dir=='bear' else '~ neutro'}")
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        sl_note   = f"SAR M5: {sar5_px:.5f}" if sar5_px > 0 else f"2%"
-                        log.info("🎯 TSAR POL %s SAR5=%.5f cloud=%s", sig.upper(), sar5_px, cloud_dir)
-                        tg(f"🎯 <b>POL SNIPER TSAR — CONFIRMAÇÃO DUPLA</b>\n"
-                           f"Par: <code>POL-USDT-SWAP</code> | {dir_scout}{ichi_note}\n"
-                           f"BB M5+M15 toque + SAR M5 inversão | SL dinâmico: {sl_note}\n"
-                           f"Saída: SAR M15 inversão")
-                        fired = _fire(GOLD_POL, sig, "TSAR POL",
-                                      tag="🎯 SNIPER POL", sl_pct=TSAR_SL_PCT,
-                                      force=True, qty_mult=1.0, tsar_monitor=True,
-                                      sl_px_override=sar5_px)
-                    else:
-                        log.debug("[TSAR POL] sem sinal")
-                except Exception as e:
-                    log.error("[TSAR POL] %s", e)
-
-            # ── 🌊 PRIORIDADE 2: SOL — SUPERTREND 15m (95% hit, HOLD) ───────
-            if not fired and st_enabled["supertrend"]:
-                try:
-                    sig = supertrend_signal(okx_candles(DUO_SOL))
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🌊 SUPERTREND SOL → %s", sig.upper())
-                        tg(f"🌊 <b>SOL SUPERTREND FIRED</b>\n"
-                           f"Par: <code>SOL-USDT-SWAP</code> | {dir_scout} | Hit: <b>95.0%</b> | HOLD\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(DUO_SOL, sig, "SUPERTREND M15", tag="🌊 TREND SURF")
-                    else:
-                        log.info("[SOL/ST] sem sinal")
-                except Exception as e:
-                    log.error("[SOL/ST] %s", e)
-
-            # ── 4: ETH — VWAP KISS ────────────────────────────────────────────
-            if not fired and st_enabled["vwap"]:
-                try:
-                    sig = vwap_kiss_signal(okx_candles(DUO_ETH))
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("💧 VWAP KISS ETH → %s", sig.upper())
-                        tg(f"💧 <b>ETH VWAP KISS FIRED</b>\n"
-                           f"Par: <code>ETH-USDT-SWAP</code> | {dir_scout} | HOLD\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(DUO_ETH, sig, "VWAP KISS M15", tag="DUO ELITE")
-                    else:
-                        log.info("[ETH] sem sinal")
-                except Exception as e:
-                    log.error("[ETH] %s", e)
-
-            # ── 5: SOL — ENGOLFO ──────────────────────────────────────────────
-            if not fired and st_enabled["engolfo"]:
-                try:
-                    sig = engolfo_signal(okx_candles(DUO_SOL))
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🔥 ENGOLFO SOL → %s", sig.upper())
-                        tg(f"🔥 <b>SOL ENGOLFO FIRED</b>\n"
-                           f"Par: <code>SOL-USDT-SWAP</code> | {dir_scout} | HOLD\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(DUO_SOL, sig, "ENGOLFO M15", tag="DUO ELITE")
-                    else:
-                        log.info("[SOL] sem sinal")
-                except Exception as e:
-                    log.error("[SOL] %s", e)
-
-            # ── 6: ADA — ORDER BLOCK DEFENSE ──────────────────────────────────
-            if not fired and st_enabled["ob"]:
-                try:
-                    sig = order_block_signal(okx_candles(SHIELD_ADA, bar="1H", limit=100))
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🛡️ ORDER BLOCK ADA → %s", sig.upper())
-                        tg(f"🛡️ <b>ADA ORDER BLOCK FIRED</b>\n"
-                           f"Par: <code>ADA-USDT-SWAP</code> | {dir_scout} | STRICT 1.5%\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(SHIELD_ADA, sig, "ORDER BLOCK 1H", tag="SHIELD 🛡️")
-                    else:
-                        log.info("[ADA] sem bloco")
-                except Exception as e:
-                    log.error("[ADA] %s", e)
-
-            # ── 7b: DOGE — ORDER BLOCK DEFENSE (STRICT 1.5%) ─────────────────
-            if not fired and st_enabled["ob"]:
-                try:
-                    sig = order_block_signal(okx_candles(GOLD_DOGE, bar="1H", limit=100))
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🎲 ORDER BLOCK DOGE → %s", sig.upper())
-                        tg(f"🎲 <b>DOGE ORDER BLOCK FIRED</b>\n"
-                           f"Par: <code>DOGE-USDT-SWAP</code> | {dir_scout} | STRICT 1.5%\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(GOLD_DOGE, sig, "ORDER BLOCK 1H", tag="🎲 DOGE SHIELD")
-                    else:
-                        log.info("[DOGE/OB] sem bloco")
-                except Exception as e:
-                    log.error("[DOGE/OB] %s", e)
-
-            # ╔══════════════ TSAR V11 MODO COMBATE — EXPULSION PROTOCOL ═════╗
-            # ── ETH · SOL — Regra da Expulsão (BB M5+M15 + RSI2 88/12 + SAR) ─
-            if not fired and _tsar_mode == "on":
-                for _ti, _ts, _tt in [
-                    (DUO_ETH, "ETH", "⚔️ TSAR"), (DUO_SOL, "SOL", "⚔️ TSAR")
-                ]:
-                    if fired: break
-                    try:
-                        sig = tsar_signal(_ti)
-                        if sig:
-                            btc_boost, _btc_r = _tsar_btc_boost()
-                            qm = 1.5 if btc_boost else 1.0
-                            boost_info = f" ⚡ BTC {_btc_r:.0f} +50%%" if btc_boost else ""
-                            log.info("⚔️ TSAR %s %s%s", _ts, sig.upper(), boost_info)
-                            tg(f"⚔️ <b>TSAR V11 — {_ts} EXPULSÃO</b>\n"
-                               f"{'LONG 🟢' if sig=='buy' else 'SHORT 🔴'} | SL 2%%{boost_info}\n"
-                               f"BB M5+M15 rompida + RSI2 exaustão + SAR M5 inverteu")
-                            fired = _fire(_ti, sig, f"TSAR V11 {_ts}",
-                                          tag=f"⚔️ TSAR {_ts}", sl_pct=TSAR_SL_PCT,
-                                          force=True, qty_mult=qm)
-                        else:
-                            log.debug("[TSAR/%s] sem sinal", _ts)
-                    except Exception as e:
-                        log.error("[TSAR/%s] %s", _ts, e)
-
-            # ╔══════════════ FVG EXPANSION SQUAD (V9) ═══════════════════════╗
-            # ── 8: SOL — FAIR VALUE GAP 15m (70.6% hit / ROI +70.4%) ────────
-            if not fired and st_enabled["fvg"] and _tsar_mode != "on":
-                try:
-                    sig = fvg_signal(okx_candles(DUO_SOL), DUO_SOL)
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🔷 FVG SOL → %s", sig.upper())
-                        tg(f"🔷 <b>SOL FAIR VALUE GAP</b>\n"
-                           f"Par: <code>SOL-USDT-SWAP</code> | {dir_scout} | HOLD\n"
-                           f"Retorno ao midpoint do gap | 70.6% hit | ROI +70.4%\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(DUO_SOL, sig, "FVG SOL 15m", tag="🔷 FVG SOL")
-                    else:
-                        log.info("[SOL/FVG] sem retorno ao gap")
-                except Exception as e:
-                    log.error("[SOL/FVG] %s", e)
-
-            # ── 9: BNB — FAIR VALUE GAP 15m (65.2% hit / ROI +48.8%) ────────
-            if not fired and st_enabled["fvg"] and _tsar_mode != "on":
-                try:
-                    sig = fvg_signal(okx_candles(FVG_BNB), FVG_BNB)
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🔷 FVG BNB → %s", sig.upper())
-                        tg(f"🔷 <b>BNB FAIR VALUE GAP</b>\n"
-                           f"Par: <code>BNB-USDT-SWAP</code> | {dir_scout} | HOLD\n"
-                           f"Retorno ao midpoint do gap | 65.2% hit | ROI +48.8%\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(FVG_BNB, sig, "FVG BNB 15m", tag="🔷 FVG BNB")
-                    else:
-                        log.info("[BNB/FVG] sem retorno ao gap")
-                except Exception as e:
-                    log.error("[BNB/FVG] %s", e)
-
-            # ── 10: ETH — FAIR VALUE GAP 15m (73.9% hit / ROI +34.9%) ───────
-            if not fired and st_enabled["fvg"] and _tsar_mode != "on":
-                try:
-                    sig = fvg_signal(okx_candles(DUO_ETH), DUO_ETH)
-                    if sig:
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        log.info("🔷 FVG ETH → %s", sig.upper())
-                        tg(f"🔷 <b>ETH FAIR VALUE GAP</b>\n"
-                           f"Par: <code>ETH-USDT-SWAP</code> | {dir_scout} | HOLD\n"
-                           f"Retorno ao midpoint do gap | 73.9% hit | ROI +34.9%\n"
-                           f"⚡ Entrando automaticamente...")
-                        fired = _fire(DUO_ETH, sig, "FVG ETH 15m", tag="🔷 FVG ETH")
-                    else:
-                        log.info("[ETH/FVG] sem retorno ao gap")
-                except Exception as e:
-                    log.error("[ETH/FVG] %s", e)
-            # ╚═══════════════════════════════════════════════════════════════╝
-
-            # ── OPÇÃO B — PA Independentes ──────────────────────────────────
-            if _mode_opb and not fired:
+            # ── 🪤 OpA — Armadilha Triple BB+SAR (SOL/BNB/ETH/DOGE) ──────────
+            if _armadilha_mode and not fired:
                 with _duo_lock:
                     em_trade = _duo_in_trade
                 if not em_trade:
-                    for par, inst_id, bar in [
-                        ("ETH", DUO_ETH,  "15m"),
-                        ("SOL", DUO_SOL,  "15m"),
-                        ("BNB", FVG_BNB,  "15m"),
-                        ("POL", GOLD_POL, "1H"),
+                    for _a_inst, _a_par in [
+                        (DUO_SOL,   "SOL"),
+                        (FVG_BNB,   "BNB"),
+                        (DUO_ETH,   "ETH"),
+                        (GOLD_DOGE, "DOGE"),
                     ]:
                         try:
-                            df = okx_candles(inst_id, bar=bar, limit=300)
-                            for pa_name, pa_fn in PA_SIGNALS.items():
-                                sig = pa_fn(df)
-                                if sig:
-                                    log.info("[OpB] %s %s → %s", pa_name, par, sig)
-                                    tg(f"📐 <b>OpB — {pa_name.upper()} {par}</b>\n"
-                                       f"Sinal: {'📈 LONG' if sig == 'buy' else '📉 SHORT'} | {bar}")
-                                    fired = _fire(inst_id, sig,
-                                                  f"OpB {pa_name}", tag=f"📐 OpB {par}",
-                                                  sl_pct=1.5, min_trail_pct=0.8)
-                                    if fired: break
-                            if fired: break
-                        except Exception as e:
-                            log.error("[OpB] %s: %s", par, e)
-
-            # ── OPÇÃO C — Híbrido (TSAR+PA 5× / só PA 3×) ──────────────────
-            if _mode_opc and not fired:
-                with _duo_lock:
-                    em_trade = _duo_in_trade
-                if not em_trade:
-                    for par, inst_id in [("ETH", DUO_ETH), ("SOL", DUO_SOL)]:
-                        try:
-                            df = okx_candles(inst_id, bar="15m", limit=300)
-                            for pa_name, pa_fn in PA_SIGNALS.items():
-                                sig = pa_fn(df)
-                                if not sig: continue
-                                tsar_confirma = tsar_signal(inst_id) == sig
-                                lev_label = "5×" if tsar_confirma else "3×"
-                                qty_mult  = 5.0 / LEVERAGE if tsar_confirma else 3.0 / LEVERAGE
-                                log.info("[OpC] %s %s %s tsar=%s lev=%s",
-                                         pa_name, par, sig, tsar_confirma, lev_label)
-                                tg(f"🔀 <b>OpC — {pa_name.upper()} {par}</b>\n"
-                                   f"Sinal: {'📈 LONG' if sig == 'buy' else '📉 SHORT'}\n"
-                                   f"{'✅ TSAR confirma — ' if tsar_confirma else '⚡ Só PA — '}{lev_label}")
-                                fired = _fire(inst_id, sig,
-                                              f"OpC {pa_name}", tag=f"🔀 OpC {par}",
-                                              sl_pct=1.5, qty_mult=qty_mult,
-                                              min_trail_pct=0.8)
+                            df5 = okx_candles(_a_inst, bar="5m", limit=100)
+                            sig = signal_macd_bollinger(df5)
+                            if sig:
+                                dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
+                                log.info("[OpA] BB+SAR %s → %s", _a_par, sig.upper())
+                                tg(f"🪤 <b>OpA — ARMADILHA {_a_par}</b>\n"
+                                   f"Par: <code>{_a_inst}</code> | {dir_scout}\n"
+                                   f"Triple BB M5 + SAR inversão | SL 1.0%")
+                                fired = _fire(_a_inst, sig,
+                                              f"OpA BB {_a_par}", tag=f"🪤 OpA {_a_par}",
+                                              sl_pct=SCALP_SL_PCT, force=True)
                                 if fired: break
-                            if fired: break
                         except Exception as e:
-                            log.error("[OpC] %s: %s", par, e)
+                            log.error("[OpA] %s: %s", _a_par, e)
 
-            # ── OPÇÃO D — Sniper MACD M5 (ETH/SOL/POL) ─────────────────────
+            # ── OPÇÃO D — Sniper MACD M5 (ETH only) ─────────────────────────
             if _mode_opd and not fired:
                 with _duo_lock:
                     em_trade = _duo_in_trade
                 if not em_trade:
                     for _d_inst, _d_par in [
-                        (DUO_ETH,  "ETH"),
-                        (DUO_SOL,  "SOL"),
-                        (GOLD_POL, "POL"),
+                        (DUO_ETH, "ETH"),
                     ]:
                         try:
                             df5 = okx_candles(_d_inst, bar="5m", limit=100)
@@ -4473,28 +3080,23 @@ def _start_health_server() -> None:
 
 if __name__ == "__main__":
     log.info("╔══════════════════════════════════════════════════════╗")
-    log.info("║   TradeSniper V9 COMMANDER — FULL SQUAD + FVG       ║")
-    log.info("║   🥇 POL  [ICHIMOKU 1H]       AUTOFIRE  97.4%% hit  ║")
-    log.info("║   🌊 SOL  [SUPERTREND+FVG 15m] AUTOFIRE  95.0%% hit  ║")
-    log.info("║   🎯 XRP  [RSI DIV+VWAP 15m]  AUTOFIRE  PF 2.38    ║")
-    log.info("║   💧 ETH  [VWAP KISS+FVG 15m] AUTOFIRE              ║")
-    log.info("║   🔷 BNB  [FVG 15m]           AUTOFIRE  65.2%% hit  ║")
-    log.info("║   🛡️ ADA  [ORDER BLOCK 1H]    AUTOFIRE              ║")
-    log.info("║   🎲 DOGE [ORDER BLOCK 1H]    AUTOFIRE  STRICT 1.5%  ║")
-    log.info("║   ⚡ TODOS 7 PARES AUTOMÁTICOS — sem /go obrigatório  ║")
-    log.info("║   SL: HOLD %.0f%% | STRICT %.1f%% | CB -%.0f%%          ║",
-             HOLD_SL_PCT, STRICT_SL_PCT, CIRCUIT_BREAKER_PCT)
-    log.info("║   🔒 STEP TRAIL V5 ATIVO  |  %dx  |  cd 30min       ║", LEVERAGE)
-    log.info("║   FVG: gaps activos em memória | expiry %d velas    ║", FVG_GAP_EXPIRY)
+    log.info("║   TradeSniper V11 SNIPER ELITE — PURGE COMPLETA     ║")
+    log.info("║   🥇 POL  [GOLDEN ICHIMOKU 1H]         AUTOFIRE     ║")
+    log.info("║   🪤 SOL/BNB/ETH/DOGE  [OpA Triple BB] AUTOFIRE     ║")
+    log.info("║   ⚡ ETH  [OpD MACD M5+MTFA]           AUTOFIRE     ║")
+    log.info("║   🏦 BTC/ETH/SOL  [OpE ICT/SMC 15m]   AUTOFIRE     ║")
+    log.info("║   SL: HOLD %.0f%% | STRICT %.1f%% | CB -$%.0f          ║",
+             HOLD_SL_PCT, STRICT_SL_PCT, CIRCUIT_BREAKER_USD)
+    log.info("║   🔒 GV5 TRAIL  |  %dx  |  cd 5min                 ║", LEVERAGE)
     log.info("╚══════════════════════════════════════════════════════╝")
 
     # Estado persistido
     _load_full_state()
     with _auth_lock:
-        log.info("Estado: %s | tsar=%r | trail=%s",
-                 "AUTORIZADO ✅" if _bot_authorized else "PAUSADO ⛔", _tsar_mode, _trail_mode)
+        log.info("Estado: %s | trail=%s",
+                 "AUTORIZADO ✅" if _bot_authorized else "PAUSADO ⛔", _trail_mode)
 
-    # Leverage — inclui BNB (V9)
+    # Leverage
     for sym in ALL_SYMS:
         okx_set_leverage(sym)
 
