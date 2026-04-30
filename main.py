@@ -112,6 +112,11 @@ _auth_lock             = threading.Lock()
 _armadilha_mode: bool  = False   # False = off | True = OpA Triple BB+SAR activo
 _trail_mode: str       = "gv5"   # "gv5" = Step Trail V5 | "gv6" = SAR M15 trailing
 
+# Dedup anti-spam: regista (direcção, timestamp) da última vez que alertámos/tentámos
+# disparar cada sinal. Evita TG metralhadora quando _fire() falha repetidamente.
+_signal_alerted: dict[str, tuple[str, float]] = {}
+_SIGNAL_COOLDOWN = 300  # 5 min — não re-alertar o mesmo sinal antes deste tempo
+
 # ── Confirmação manual (120s) — sinais não-POL aguardam /go[coin] ─────────────
 _pending_signals: dict = {}   # coin_key → (inst_id, side, signal_name, tag, expiry)
 _pending_lock          = threading.Lock()
@@ -323,24 +328,34 @@ def okx_ticker(inst_id: str) -> float:
     return float(d["data"][0]["last"])
 
 # ── OKX — lot size ────────────────────────────────────────────────────────────
-def okx_lot_size(inst_id: str) -> float:
+def okx_lot_size(inst_id: str) -> tuple[float, float]:
+    """Retorna (ctVal, lotSz) do instrumento.
+    ctVal: valor em USD de 1 contrato.
+    lotSz: múltiplo mínimo de contratos exigido pela OKX."""
     try:
         r = requests.get(f"{OKX_BASE}/public/instruments?instType=SWAP&instId={inst_id}", timeout=8)
         d = r.json()
         if d.get("code") == "0" and d.get("data"):
-            return float(d["data"][0].get("ctVal", 1))
+            info = d["data"][0]
+            return float(info.get("ctVal", 1)), float(info.get("lotSz", 1))
     except Exception:
         pass
-    return 1.0
+    return 1.0, 1.0
 
 # ── Cálculo de contratos ALL-IN com reserva fixa $30 ────────────────────────
 # usable = availEq - $30  → cobre taker fee open+close, slippage e funding.
 # Evita sCode=51008 (Insufficient Margin) sem desperdiçar margem em %.
 
 def calc_qty(inst_id: str, price: float, balance: float) -> int:
-    ct_val = okx_lot_size(inst_id)
-    usable = max(0.0, balance - FEE_RESERVE_USD)
-    return max(1, int(usable * LEVERAGE / (price * ct_val)))
+    ct_val, lot_sz = okx_lot_size(inst_id)
+    usable   = max(0.0, balance - FEE_RESERVE_USD)
+    raw      = usable * LEVERAGE / (price * ct_val)
+    # floor para o múltiplo de lotSz (ex: POL lotSz=10 → 23 → 20)
+    lot_sz_i = max(1, int(lot_sz))
+    contracts = max(lot_sz_i, int(raw // lot_sz_i) * lot_sz_i)
+    log.debug("calc_qty %s: raw=%.1f lotSz=%d → %d (ctVal=%.4f bal=%.2f)",
+              inst_id, raw, lot_sz_i, contracts, ct_val, balance)
+    return contracts
 
 # ── OKX — market order ────────────────────────────────────────────────────────
 _SIDE_PS = {"buy": "long", "sell": "short"}
@@ -1464,6 +1479,12 @@ def _fire(inst_id: str, side: str, signal_name: str,
     with _duo_lock:
         _lockdown_until = max(_lockdown_until, time.time() + LOCKDOWN_SECS)
 
+    # Pre-alerta TG sincronizado com o disparo — enviado na mesma passagem que a ordem
+    log.info("🚀 [%s] DISPARANDO ordem %s %s qty=%d px≈%.5f", tag, sym, side.upper(), qty, market_px)
+    tg(f"🎯 <b>{tag} — SINAL CONFIRMADO</b>\n"
+       f"Par: <code>{sym}</code> | {'📈 LONG' if side == 'buy' else '📉 SHORT'} | {signal_name}\n"
+       f"💰 Alvo $20 NET | CB -${CIRCUIT_BREAKER_USD:.0f} | Enviando ordem…")
+
     try:
         res    = okx_open_market(inst_id, side, qty)
         ord_id = (res.get("data") or [{}])[0].get("ordId", "?")
@@ -1475,8 +1496,8 @@ def _fire(inst_id: str, side: str, signal_name: str,
            f"Preço: <code>{market_px:.5f}</code> | ordId: <code>{ord_id}</code> | {LEVERAGE}× ALL-IN")
     except Exception as ex:
         err_msg = str(ex)
-        log.error("❌ ERRO OKX [%s] %s: %s", tag, sym, err_msg)
-        tg(f"❌ <b>ERRO OKX [{tag}]</b>\n<code>{err_msg}</code>")
+        log.error("❌ ERRO OKX [%s] %s qty=%d px=%.5f: %s", tag, sym, qty, market_px, err_msg)
+        tg(f"❌ <b>ERRO OKX [{tag}] {sym}</b>\nqty={qty} px={market_px:.5f}\n<code>{err_msg}</code>")
         with _duo_lock:
             _lockdown_until = time.time()   # reset lockdown — falha não deve penalizar
         return False
@@ -2880,21 +2901,23 @@ def duo_elite_loop() -> None:
             if not fired and st_enabled["ichimoku"]:
                 try:
                     sig_raw = ichimoku_signal(okx_candles(GOLD_POL, bar="1H", limit=200))
-                    # Modo exaustão: sinal invertido — o Ichimoku na POL
-                    # gerava -$200 seguindo tendência. Invertido usa o sinal
-                    # como indicador de exaustão e entra na reversão.
+                    # Modo exaustão: sinal invertido
                     if sig_raw == "buy":    sig = "sell"
                     elif sig_raw == "sell": sig = "buy"
                     else:                  sig = None
                     if sig:
-                        log.info("[ICHI POL INVERTIDO] raw=%s → entrada=%s", sig_raw, sig)
-                        dir_scout = "📈 LONG" if sig == "buy" else "📉 SHORT"
-                        tg(f"🥇 <b>GOLDEN — POL ICHIMOKU INVERTIDO</b>\n"
-                           f"Par: <code>POL-USDT-SWAP</code> | Sinal: <b>ICHIMOKU 1H (exaustão)</b>\n"
-                           f"Direção: <b>{dir_scout}</b>  | raw={sig_raw} → invertido\n"
-                           f"💰 Hold the hand — alvo $20 NET. Circuit breaker -${CIRCUIT_BREAKER_USD:.0f}.")
-                        fired = _fire(GOLD_POL, sig, "ICHIMOKU POL", tag="🥇 GOLDEN POL")
+                        # Dedup: ignora se já tentámos este sinal nos últimos 5 min
+                        _prev_sig, _prev_t = _signal_alerted.get(GOLD_POL, (None, 0.0))
+                        _already = (_prev_sig == sig and time.time() - _prev_t < _SIGNAL_COOLDOWN)
+                        if _already:
+                            log.debug("[POL] sinal %s já alertado %.0fs atrás — aguardando cooldown",
+                                      sig, time.time() - _prev_t)
+                        else:
+                            log.info("[ICHI POL INVERTIDO] raw=%s → entrada=%s", sig_raw, sig)
+                            _signal_alerted[GOLD_POL] = (sig, time.time())
+                            fired = _fire(GOLD_POL, sig, "ICHIMOKU POL", tag="🥇 GOLDEN POL")
                     else:
+                        _signal_alerted.pop(GOLD_POL, None)  # limpa dedup quando sinal desaparece
                         log.info("[POL] sem sinal")
                 except Exception as e:
                     log.error("[POL] %s", e)
